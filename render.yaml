@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: athena-api
+    runtime: docker
+    dockerfilePath: ./services/api/Dockerfile
+    dockerContext: ./services/api
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: SEARXNG_URL
+        sync: false
+      # production hardening — the API fails fast at startup if these are missing while ATHENA_ENV != dev
+      - key: ATHENA_ENV
+        value: production
+      - key: ATHENA_SECRET        # Fernet key for the API-key vault (required; survives redeploys)
+        sync: false
+      - key: ATHENA_API_TOKEN     # shared bearer token required on every sensitive endpoint
+        sync: false
+      - key: ATHENA_CORS_ORIGINS  # your deployed frontend origin, e.g. https://athena.vercel.app
+        sync: false

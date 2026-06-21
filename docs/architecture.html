@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root{
+    --bg:#F1F5F9; --ink:#0F172A; --muted:#64748B; --line:#CBD5E1; --card:#FFFFFF;
+    --ui:#2563EB; --ui-bg:#EFF6FF; --adk:#059669; --adk-bg:#ECFDF5;
+    --mcp:#CA8A04; --mcp-bg:#FEFCE8; --eng:#7C3AED; --eng-bg:#F5F3FF;
+    --trust:#E11D48; --trust-bg:#FFF1F2; --data:#475569; --data-bg:#F8FAFC;
+    --sec:#DC2626; --sec-bg:#FEF2F2;
+  }
+  body{ width:1640px; padding:36px 40px 30px; background:var(--bg); color:var(--ink);
+        font-family:'Segoe UI',Inter,system-ui,Arial,sans-serif; -webkit-font-smoothing:antialiased; }
+  .head{ display:flex; align-items:flex-end; justify-content:space-between; margin-bottom:18px; }
+  .head h1{ font-size:33px; font-weight:800; letter-spacing:-.5px; }
+  .head h1 span{ color:var(--eng); }
+  .head .sub{ font-size:15px; color:var(--muted); margin-top:6px; max-width:1020px; }
+  .head .tag{ text-align:right; font-size:13px; color:var(--muted); line-height:1.6; }
+  .head .tag b{ color:var(--ink); }
+  .wrap{ display:flex; gap:22px; align-items:flex-start; }
+  .col{ flex:1; display:flex; flex-direction:column; gap:0; }
+  .rail{ width:372px; display:flex; flex-direction:column; gap:16px; }
+  .arrow{ text-align:center; color:#94A3B8; font-size:17px; line-height:1; padding:5px 0; font-weight:700;}
+  .arrow small{ color:var(--muted); font-weight:600; font-size:11.5px; margin-left:8px; }
+  .band{ background:var(--card); border:1px solid var(--line); border-left:7px solid var(--ac);
+         border-radius:13px; padding:14px 16px 16px; box-shadow:0 1px 2px rgba(15,23,42,.04); }
+  .band > h2{ display:flex; align-items:center; gap:10px; font-size:18px; font-weight:800; color:var(--ac); margin-bottom:3px;}
+  .band > h2 .n{ display:inline-grid; place-items:center; width:25px;height:25px;border-radius:7px;
+                 background:var(--ac); color:#fff; font-size:14px; }
+  .band > h2 .meta{ margin-left:auto; font-size:12.5px; font-weight:600; color:var(--muted); }
+  .row{ display:flex; gap:10px; margin-top:11px; }
+  .box{ flex:1; background:var(--bg2,#fff); border:1.4px solid var(--bd,var(--line)); border-radius:9px;
+        padding:9px 11px; }
+  .box .t{ font-size:13.7px; font-weight:700; }
+  .box .d{ font-size:11.8px; color:var(--muted); margin-top:2px; line-height:1.35; }
+  .chip{ background:#fff; border:1.4px solid var(--bd,var(--line)); border-radius:999px;
+         padding:6px 13px; font-size:12.8px; font-weight:650; }
+  .chips{ display:flex; flex-wrap:wrap; gap:8px; margin-top:11px; }
+  /* engine internals */
+  .panel{ background:var(--eng-bg); border:1.4px dashed #C4B5FD; border-radius:10px; padding:11px 12px; margin-top:12px;}
+  .panel .pt{ font-size:12.6px; font-weight:800; color:var(--eng); letter-spacing:.3px; text-transform:uppercase; margin-bottom:8px;}
+  .flow{ display:flex; align-items:stretch; gap:7px; }
+  .flow .box{ flex:1; }
+  .flow .ar{ align-self:center; color:#A78BBF; font-weight:800; font-size:15px; }
+  .ladder{ font-size:12px; color:var(--eng); background:#EDE9FE; border:1px solid #DDD6FE; border-radius:8px;
+           padding:7px 11px; margin-top:11px; font-weight:600; }
+  .trust{ background:var(--trust-bg); border:1.8px solid var(--trust); border-radius:11px; padding:12px 13px; margin-top:12px;}
+  .trust .th{ display:flex; align-items:center; gap:9px; font-weight:800; color:var(--trust); font-size:15.5px;}
+  .trust .th .moat{ margin-left:auto; background:var(--trust); color:#fff; font-size:11px; font-weight:800;
+                    padding:3px 9px; border-radius:999px; letter-spacing:.4px;}
+  .trust .chips .chip{ border-color:#FECDD3; color:#9F1239; }
+  /* rail cards */
+  .rc{ background:var(--card); border:1px solid var(--line); border-radius:13px; padding:14px 15px; box-shadow:0 1px 2px rgba(15,23,42,.04);}
+  .rc h3{ font-size:15.5px; font-weight:800; margin-bottom:9px; display:flex; align-items:center; gap:8px;}
+  .rc h3 .dot{ width:10px;height:10px;border-radius:3px; }
+  .rc ul{ list-style:none; display:flex; flex-direction:column; gap:7px; }
+  .rc li{ font-size:12.9px; line-height:1.4; padding-left:18px; position:relative; color:#1E293B;}
+  .rc li::before{ content:""; position:absolute; left:0; top:6px; width:7px;height:7px;border-radius:2px; background:var(--eng); }
+  .rc li b{ color:var(--ink); }
+  .rc.verified li::before{ background:#16A34A; }
+  .rc.verified li{ font-weight:600; }
+  .badges{ display:flex; flex-wrap:wrap; gap:7px; }
+  .badge{ font-size:12.3px; font-weight:700; padding:5px 11px; border-radius:8px; border:1.4px solid; }
+  .foot{ margin-top:14px; font-size:12.6px; color:var(--muted); text-align:center; }
+  .foot b{ color:var(--ink); }
+  .mono{ font-family:'Cascadia Code',Consolas,monospace; font-size:11px; color:var(--muted); }
+</style>
+</head>
+<body>
+  <div class="head">
+    <div>
+      <h1>🔱 ATHENA — Architecture &amp; Capabilities <span>·</span> the Trust Ledger is the moat</h1>
+      <div class="sub">Autonomous multi-agent research analyst. <b>Google ADK → MCP → FastAPI engine</b>, with a Next.js live UI.
+        Specialized agents search, read, chase primary sources, and synthesize — then an independent trust layer verifies every claim.</div>
+    </div>
+    <div class="tag"><b>Kaggle — Agents for Business</b><br>Built with <b>Google Antigravity</b><br>306 backend · 47 frontend tests</div>
+  </div>
+
+  <div class="wrap">
+    <!-- ================= MAIN COLUMN ================= -->
+    <div class="col">
+
+      <!-- L1 UI -->
+      <div class="band" style="--ac:var(--ui)">
+        <h2><span class="n">1</span> User Interface — Next.js (live via SSE) <span class="meta">streams the agent's reasoning as it happens</span></h2>
+        <div class="row">
+          <div class="box" style="--bd:#BFDBFE"><div class="t">Ask + Plan editor</div><div class="d">Topic, depth, deep/patient, editable sub-questions</div></div>
+          <div class="box" style="--bd:#BFDBFE"><div class="t">Live knowledge graph</div><div class="d">Sources appear round by round</div></div>
+          <div class="box" style="--bd:#BFDBFE"><div class="t">Coverage ledger</div><div class="d">Per-facet bars fill live</div></div>
+          <div class="box" style="--bd:#BFDBFE"><div class="t">Trust panel</div><div class="d">Verdicts · conflicts · link badges</div></div>
+          <div class="box" style="--bd:#BFDBFE"><div class="t">Report + Key vault</div><div class="d">Streaming report · BYO keys</div></div>
+        </div>
+      </div>
+      <div class="arrow">▲ ▼ <small>SSE stream up · request down</small></div>
+
+      <!-- L2 ADK -->
+      <div class="band" style="--ac:var(--adk)">
+        <h2><span class="n">2</span> Agent layer — Google ADK + Agents CLI <span class="meta">research-concierge/app/agent.py</span></h2>
+        <div class="row">
+          <div class="box" style="--bd:#A7F3D0"><div class="t">Coordinator <span class="mono">LlmAgent</span></div><div class="d">Routes by intent: new vs follow-up</div></div>
+          <div class="box" style="--bd:#A7F3D0"><div class="t">Clarifier</div><div class="d">Vague ask → precise question</div></div>
+          <div class="box" style="--bd:#A7F3D0"><div class="t">Researcher ⇄ Critic <span class="mono">LoopAgent</span></div><div class="d">Self-critique, bounded drill, <span class="mono">exit_loop</span></div></div>
+          <div class="box" style="--bd:#A7F3D0"><div class="t">Briefer</div><div class="d">TL;DR + cited findings + rec</div></div>
+          <div class="box" style="--bd:#A7F3D0"><div class="t">Followup</div><div class="d">Grounded Q&amp;A on a finished run</div></div>
+        </div>
+      </div>
+      <div class="arrow">▼ <small>MCPToolset (stdio)</small></div>
+
+      <!-- L3 MCP -->
+      <div class="band" style="--ac:var(--mcp)">
+        <h2><span class="n">3</span> MCP server — FastMCP (stdio) <span class="meta">services/api/athena/mcp/server.py</span></h2>
+        <div class="chips">
+          <div class="chip" style="--bd:#FDE68A"><span class="mono">deep_research()</span></div>
+          <div class="chip" style="--bd:#FDE68A"><span class="mono">get_report()</span></div>
+          <div class="chip" style="--bd:#FDE68A"><span class="mono">rerank_sources()</span> · cross-encoder skill</div>
+          <div class="chip" style="--bd:#FDE68A"><span class="mono">verify_claims()</span> · 2nd-model skill</div>
+          <div class="chip" style="--bd:#FDE68A">+ external Tavily MCP (opt)</div>
+        </div>
+      </div>
+      <div class="arrow">▼</div>
+
+      <!-- L4 ENGINE -->
+      <div class="band" style="--ac:var(--eng)">
+        <h2><span class="n">4</span> Research engine — FastAPI async multi-agent pipeline <span class="meta">the deep-research loop</span></h2>
+        <div class="ladder">⚙ <b>Model ladder</b> — cheap/fast tier: plan · triage · link-rank · outline · entailment &nbsp;|&nbsp; frontier tier: section synthesis &nbsp;(BYO key: Groq · Gemini · DeepSeek · Ollama)</div>
+
+        <div class="panel">
+          <div class="pt">The round loop &nbsp;·&nbsp; ≤ 5 rounds (deep mode) &nbsp;·&nbsp; ↺ drills until every facet is covered</div>
+          <div class="flow">
+            <div class="box" style="--bd:#DDD6FE"><div class="t">Decompose → facets</div><div class="d">Stable sub-questions</div></div>
+            <div class="ar">→</div>
+            <div class="box" style="--bd:#DDD6FE"><div class="t">Parallel sub-agent / facet</div><div class="d">Metered fan-out</div></div>
+            <div class="ar">→</div>
+            <div class="box" style="--bd:#DDD6FE"><div class="t">Search → RRF → rerank</div><div class="d">DDG·SearXNG·Tavily · cross-encoder</div></div>
+            <div class="ar">→</div>
+            <div class="box" style="--bd:#DDD6FE"><div class="t">Breadth-first read</div><div class="d">≥2 reads / facet</div></div>
+            <div class="ar">→</div>
+            <div class="box" style="--bd:#C4B5FD; background:#F5F3FF"><div class="t">Multi-hop chase ⛓</div><div class="d">Follow refs → <b>primary sources</b> (docs/GitHub/arXiv)</div></div>
+          </div>
+          <div class="flow" style="margin-top:9px">
+            <div class="box" style="--bd:#C4B5FD; background:#FAF5FF"><div class="t">↺ Coverage ledger → controller</div>
+              <div class="d"><b>Drill the weakest facet · adaptively expand the plan · or stop</b> — never quits with an under-covered facet</div></div>
+          </div>
+        </div>
+
+        <div class="panel" style="border-style:solid; border-color:#DDD6FE;">
+          <div class="pt">Synthesis &amp; trust</div>
+          <div class="flow">
+            <div class="box" style="--bd:#DDD6FE; flex:1.5"><div class="t">Section-by-section synthesis</div><div class="d">Outline → per-section retrieval → grounded write · globally-consistent [n] citations</div></div>
+          </div>
+          <div class="trust">
+            <div class="th">🛡 TRUST LEDGER — verifies every cited claim <span class="moat">THE MOAT</span></div>
+            <div class="chips">
+              <div class="chip">Entailment NLI — <b>Supported / Refuted / Not-Enough-Info</b></div>
+              <div class="chip">Cross-source <b>conflict</b> detection</div>
+              <div class="chip">URL-liveness probe (catches fabricated links)</div>
+              <div class="chip">Independent 2-model verify</div>
+              <div class="chip">Quality 0–100 + hallucination risk %</div>
+              <div class="chip">Span-level citations + claims audit trail</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="arrow">▼ <small>persist</small></div>
+
+      <!-- L5 DATA -->
+      <div class="band" style="--ac:var(--data)">
+        <h2><span class="n">5</span> Data &amp; memory</h2>
+        <div class="row">
+          <div class="box" style="--bd:#CBD5E1; flex:2"><div class="t">Postgres + pgvector</div><div class="d">sources · reports · <b>claims</b> (audit) · research_memory (cross-run) · kg_entities/relations</div></div>
+          <div class="box" style="--bd:#CBD5E1"><div class="t">Redis / Valkey</div><div class="d">search + page cache · faster re-runs</div></div>
+          <div class="box" style="--bd:#CBD5E1"><div class="t">GraphRAG</div><div class="d">entity-relationship triples (opt-in)</div></div>
+        </div>
+      </div>
+      <div class="arrow">▲ ▼</div>
+
+      <!-- L6 SECURITY -->
+      <div class="band" style="--ac:var(--sec)">
+        <h2><span class="n">6</span> Security — cross-cutting (defense in depth)</h2>
+        <div class="chips">
+          <div class="chip" style="--bd:#FECACA">🔐 Fernet key vault (keys never cross the MCP wire)</div>
+          <div class="chip" style="--bd:#FECACA">🛡 SSRF + DNS-rebinding guard (every fetch hop)</div>
+          <div class="chip" style="--bd:#FECACA">🚧 Prompt-injection «UNTRUSTED» fences</div>
+          <div class="chip" style="--bd:#FECACA">🔑 Constant-time bearer auth</div>
+          <div class="chip" style="--bd:#FECACA">CSP · CORS allow-list · secret redaction</div>
+        </div>
+      </div>
+
+      <div class="foot">306 backend + 47 frontend tests · 4-agent codebase audit (<b>0 critical/high</b>) · independent-judge regression eval · <b>Built with Google Antigravity</b></div>
+    </div>
+
+    <!-- ================= RIGHT RAIL ================= -->
+    <div class="rail">
+      <div class="rc">
+        <h3><span class="dot" style="background:var(--eng)"></span> Improvements we shipped</h3>
+        <ul>
+          <li><b>Trust Ledger</b> — replaced symmetric cosine with directional <b>entailment</b>; added conflicts, URL-liveness, coverage</li>
+          <li><b>Parallel sub-agents</b> per facet (metered concurrency)</li>
+          <li><b>Coverage-driven</b> stop + drill (won't quit with a gap)</li>
+          <li><b>Multi-hop citation chasing</b> → primary sources</li>
+          <li><b>Section-by-section</b> synthesis + per-section retrieval</li>
+          <li><b>Adaptive planning</b> — append-only facet growth</li>
+          <li><b>Model ladder</b> — cost/quality routing</li>
+          <li><b>GraphRAG</b> entity-relationship memory (opt-in)</li>
+          <li><b>Heartbeat</b> keepalive for long synthesis</li>
+          <li><b>Hardening</b> — SSRF/rebind, injection fences, FK, key redaction</li>
+        </ul>
+      </div>
+
+      <div class="rc">
+        <h3><span class="dot" style="background:var(--adk)"></span> Course concepts (5 of 6)</h3>
+        <div class="badges">
+          <span class="badge" style="color:#047857;border-color:#A7F3D0;background:#ECFDF5">ADK multi-agent</span>
+          <span class="badge" style="color:#A16207;border-color:#FDE68A;background:#FEFCE8">MCP server</span>
+          <span class="badge" style="color:#6D28D9;border-color:#DDD6FE;background:#F5F3FF">Agent skills</span>
+          <span class="badge" style="color:#B91C1C;border-color:#FECACA;background:#FEF2F2">Security</span>
+          <span class="badge" style="color:#334155;border-color:#CBD5E1;background:#F8FAFC">Deployability</span>
+          <span class="badge" style="color:#1D4ED8;border-color:#BFDBFE;background:#EFF6FF">Grounding / RAG</span>
+          <span class="badge" style="color:#1D4ED8;border-color:#BFDBFE;background:#EFF6FF">Structured output</span>
+          <span class="badge" style="color:#1D4ED8;border-color:#BFDBFE;background:#EFF6FF">Evaluation</span>
+        </div>
+      </div>
+
+      <div class="rc verified">
+        <h3><span class="dot" style="background:#16A34A"></span> Verified</h3>
+        <ul>
+          <li>306 backend tests pass</li>
+          <li>47 frontend tests pass</li>
+          <li>4-agent audit — 0 critical / high</li>
+          <li>Independent-judge eval gate</li>
+          <li>SSRF / DNS-rebind closed</li>
+          <li>Keys encrypted (Fernet), redacted in logs</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

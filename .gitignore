@@ -1,0 +1,56 @@
+# ── Secrets & env (NEVER commit) ───────────────────────────────────────────
+.env
+.env.*
+# keep the documented templates (negations must follow the broad rule above)
+!.env.example
+!.env.*.example
+.athena_key
+services/api/.athena_key
+*.pem
+*.key
+secrets.*
+
+# ── Python ─────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg
+*.egg-info/
+.venv/
+venv/
+env/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# ── Node / Next.js ─────────────────────────────────────────────────────────
+node_modules/
+.next/
+.turbo/
+.pnpm-store/
+*.tsbuildinfo
+next-env.d.ts
+
+# ── Tests / build output ───────────────────────────────────────────────────
+.vitest/
+coverage/
+playwright-report/
+test-results/
+exports/
+
+# ── Agent/dev tooling (not part of the product) ────────────────────────────
+.claude/
+CLAUDE.md
+**/CLAUDE.md
+docs/plans/
+docs/superpowers/
+
+# ── Editor / OS ────────────────────────────────────────────────────────────
+.idea/
+.DS_Store
+Thumbs.db
+*.log

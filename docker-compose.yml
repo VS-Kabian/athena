@@ -1,0 +1,57 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped            # auto-recover instead of staying down on a crash
+    environment:
+      POSTGRES_PASSWORD: athena
+      POSTGRES_DB: athena
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:                       # so dependents wait until Postgres can actually accept queries
+      test: ["CMD-SHELL", "pg_isready -U postgres -d athena"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+  valkey:
+    image: valkey/valkey:8
+    restart: unless-stopped
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    ports: ["8080:8080"]
+    environment:
+      SEARXNG_BASE_URL: http://localhost:8080/
+    volumes: ["./infra/searxng:/etc/searxng"]
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    ports: ["11434:11434"]
+    volumes: ["ollama:/root/.ollama"]
+  api:
+    build:
+      context: ./services/api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy    # don't start the API until the DB is ready (no boot races)
+      valkey:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql://postgres:athena@postgres:5432/athena
+      REDIS_URL: redis://valkey:6379/0
+      SEARXNG_URL: http://searxng:8080
+      ATHENA_ENV: ${ATHENA_ENV:-dev}
+      # set these in a local .env to persist the key vault across restarts / require auth:
+      ATHENA_SECRET: ${ATHENA_SECRET:-}
+      ATHENA_API_TOKEN: ${ATHENA_API_TOKEN:-}
+      ATHENA_CORS_ORIGINS: ${ATHENA_CORS_ORIGINS:-http://localhost:3000}
+    ports: ["7000:7000"]
+volumes:
+  pgdata:
+  ollama:
