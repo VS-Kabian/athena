@@ -1,20 +1,25 @@
-# ATHENA Technical Audit & Gap Analysis Report (v3)
+# ATHENA Technical Audit & Gap Analysis Report (v4)
 
 **Auditor:** Principal AI Research-Systems Engineer
-**Method:** Exhaustive read of every backend + frontend file (4 parallel subsystem audits: agents, retrieval, API/infra/eval, UI), benchmarked against Gemini Deep Research, Perplexity Deep Research, and ChatGPT/OpenAI Deep Research (o-series). Every finding cites a real `file:symbol`.
+**Method:** Exhaustive read of every backend + frontend file (parallel subsystem audits: agents, retrieval, API/infra/eval, UI), benchmarked against Gemini Deep Research, Perplexity Deep Research, and ChatGPT/OpenAI Deep Research (o-series). Every finding cites a real `file:symbol`. **Current test baseline: backend 384 passed, frontend `tsc --noEmit` clean + 55 vitest passed.**
 
-> **What changed since v2.** v2 correctly named the big *capability* gaps (code interpreter, editable plan, multimodal). This v3 keeps those and adds what a line-by-line sweep found that v2 missed: **a broken eval harness, an SSRF redirect hole, unguarded prompt-injection, citation-fallback that masks hallucinations, non-idempotent RRF, and an open auth/key-theft surface.** Already-implemented features (reflective deep mode, two-model verifier, span citations, cross-run memory, fast/strong routing, report templates, patient mode, token budgeting, reranker relevance, JS-fetch fallback, Fernet-from-env, stale-run reconcile) are **not** re-recommended — only improved.
+> **What changed since v3 (this is the up-to-date state).** Most v3 findings have been **closed** by two programs of work: (1) the 5-improvement deep-research upgrade — **mid-loop reading + coverage ledger, multi-hop citation chasing, section-by-section synthesis, adaptive planning, model ladder, GraphRAG**; and (2) the **trust & research-quality overhaul (Milestones A–D)** which made the hallucination metric *honest* and the pipeline higher-quality. Sections 1–3 below have been rewritten to current reality; §4 (the original v3 FIX/CHANGE/NEW list) is kept as **historical record** and is superseded by the **§3.5 findings-status table**. Companion docs: `docs/RESEARCH-QUALITY-AUDIT-2026-06.md`, `docs/RESEARCH-QUALITY-EXECUTION-PLAN.md`, `docs/RESEARCH-QUALITY-ROADMAP.md`.
+>
+> **What landed in Milestones A–D:** honest risk aggregate (pre-verifier, NEI near-full weight, + conflicts/dead-links/verifier-corrections/uncited); write-time claim-grounding gate; NLI as the support decision with an honest cosine-only fallback (reduced-assurance + uncertainty floor); no blank-report cliff (persist retry + inline fallback + degraded-run UI disclosure); evidence-aligned factcheck; content-aware reranking + config-gated retriever + all-chunk ranking; reference-free re-verification; per-claim verdict ledger UI; recency-biased retrieval; provider 429/Retry-After backoff; SSE id/Last-Event-ID resume + reconnect; RAGAS-faithfulness + ALCE citation precision/recall + a regression gate; section-write retry; prompt-injection fence hardening; grounding gates the quality score; validator authority allowlist; PDF layout-aware extraction; domain-clustered corroboration; hop trust gate.
 
 ---
 
-## 1. Executive Summary
+## 1. Executive Summary (v4 — current)
 
-ATHENA has a genuinely strong retrieval/RAG core and, after recent work, a real agentic layer (reflect/drill/stop, second-model verification, cross-run memory). But a full read shows it is **not yet "deep" in the Gemini/ChatGPT sense, and not yet safe to expose.** Two truths dominate:
+ATHENA has a top-tier retrieval/RAG core **and** a real agentic depth layer **and** an honest, auditable trust layer. The v3 "one architectural gap from real deep research" and the trust/measurement holes are **closed**:
 
-- **Research-quality lever (the single biggest one):** ATHENA **never reads sources mid-loop.** `graph.py:_run_research_inner` does all fetching in one batch *after* every round finishes, so `controller.py:reflect` and `planner.py:refine` decide "drill vs stop" from titles + 200-char snippets only (`_round_digest`). The defining behavior of Gemini/ChatGPT DR — read → discover → re-query, and follow citations to primary sources — is absent. **Move fetching inside the round loop and add a coverage ledger + multi-hop link-chasing.** Everything else in "research depth" follows from this.
-- **Production gate:** there is **no auth**, a **single global key vault** (any caller can use/steal another tenant's keys — `keys.py`, `api_keys` PK is `provider` alone), **IDOR** on every `run_id`, a **redirect-based SSRF** hole (`fetch.py`), and **unguarded prompt-injection** from fetched pages into the synthesizer. And the **eval harness is broken** (`harness.py` selects a non-existent column), so quality regressions are currently undetectable.
+- **Research depth — RESOLVED.** ATHENA reads sources **mid-loop** (`graph._read_top` → reflect/refine see real content), maintains a sub-question × entity **coverage ledger** that drives drill/expand/stop, and follows citations to primaries via **multi-hop chasing** (`hop.py`, now behind a trust gate). Synthesis is section-by-section with globally consistent `[n]` citations.
+- **Trust / honesty — RESOLVED (the differentiator).** Grounding is **directional entailment** (Supported/Refuted/NEI), not bare cosine; the reported hallucination risk is **honest** — measured on the *pre-verifier* report, NEI near-full weight, with cross-source conflicts, dead/fabricated citations, verifier corrections, and **uncited** claims folded in, and a **cosine-only fallback is disclosed as reduced-assurance** (uncertainty floor) instead of faking a low number. Claim grounding is enforced at write time; a per-claim **verdict ledger** is exposed in the UI; and a **RAGAS-faithfulness + ALCE citation-precision/recall** eval with a **regression gate** exists to prove it over time.
+- **Safety — hardened.** SSRF is guarded (manual redirect re-validation + DNS-rebind peer-IP check), prompt-injection fences are neutralized in every untrusted-text path, the API is behind a shared-token gate, and inputs/endpoints are parameterized (no SQLi). An independent correctness+security review of the latest work found **no CRITICAL/HIGH issues**.
 
-Verdict: a high-quality prototype with a top-tier retrieval core, one architectural gap from real "deep research," and several correctness/security holes that block both quality measurement and deployment.
+**What remains (honest, capability/scale — not correctness or trust holes):** code interpreter / quantitative analysis (❌); image/figure *understanding* (PDF text **and tables** are now extracted; images are still dropped); **multi-tenant** auth + per-run/per-user keys (a shared-token gate exists; per-run token deferred); a **durable queue + Redis event bus** (still in-process; SSE now resumes/reconnects); server-backed history + follow-up.
+
+Verdict: production-grade trust + agentic depth; the open items are capability breadth (code/vision), multi-tenancy, and durable orchestration.
 
 ---
 
@@ -27,12 +32,16 @@ Verdict: a high-quality prototype with a top-tier retrieval core, one architectu
 - **Cross-run memory** — `memory.py:remember/recall` over pgvector (HNSW), with a similarity floor.
 - **Role-based model routing** — `graph.py` `fast = llm_fast or llm`; strong model reserved for synthesis.
 
-### Weak / divergent (grounded)
-- **Linear pipeline, late reading** — `graph.py:_run_research_inner`: rounds do search→relevance→validate→persist, but `fetch_many`/`build_evidence` run once at the end. Reflection/refinement are blind to content. **Root cause of the depth gap.**
-- **No source-state model** — research state is just `all_hits` (a URL dict) + free-text `findings_text`. No per-sub-question/per-entity coverage ledger, so "what do we still not know" is never computed.
-- **Faithfulness is cosine-only** — `guard.py:factcheck` uses embedding cosine ≥ 0.55; cosine catches off-topic but not negation ("X improves Y" vs "X does *not* improve Y" embed nearly identically). No entailment, no cross-source consensus.
-- **Trust is inert** — `validator.py:score_source` is a static substring allowlist; `rag.py:build_evidence` defaults `trust=0.5` for every web source and never *computes* it, so the trust term is effectively constant. This is why **Validation scores 0/22** on real runs.
-- **Open, single-process, single-tenant** — `runs.py:start_research` fire-and-forget `asyncio.create_task`; `events.py:EventBus` in-memory (breaks at >1 worker, leaks queues); no auth anywhere.
+### Previously weak — now RESOLVED (v4)
+- **Mid-loop reading** — ✅ `graph._read_top` fetches the round's top sources so reflect/refine reason over real content; a sub-question × entity **coverage ledger** (`coverage.py`) drives drill/expand/stop. (Was the root-cause depth gap.)
+- **Faithfulness** — ✅ directional **entailment** (`entail.py`: Supported/Refuted/NEI) supersedes bare cosine; cosine is a candidate pre-filter only, and is raised + disclosed as *reduced-assurance* when it's the sole signal. Cross-source **consensus** counts DISTINCT domains (`guard._domain`) so mirrors can't fake agreement.
+- **Honest measurement** — ✅ `quality.aggregate_risk` is the headline: pre-verifier, NEI near-full, + conflicts/dead-links/verifier-corrections/uncited; grounding **gates** the quality score (`quality_score` multiplicative penalty).
+- **Trust scoring** — ✅ `validator.py` tiers by **registered-domain** allowlist (no substring spoofing; `docs.`/`/docs` is a modifier, not a grant) + recency signals + query-side recency bias (`select.recency_query`).
+- **Eval** — ✅ harness reads `quality_score` from `research_runs` (the broken-column bug is gone) and adds **faithfulness + citation precision/recall + a regression gate** (`eval/metrics.py`, `eval/harness.regression_gate`).
+
+### Still weak / open (v4)
+- **Single-process, single-tenant** — `runs.py` fire-and-forget `asyncio.create_task`; `events.py:EventBus` in-process (SSE now resumes/reconnects via `Last-Event-ID`, but a **durable queue + Redis bus** for >1 worker / restart survival is still open). Auth is a **shared token** (`auth.py`); **per-run/per-user keys + RLS** are deferred.
+- **Modality / compute** — no code interpreter; image/figure understanding absent (PDF **text+tables** are extracted via pypdf layout mode, but figures/charts are not described).
 
 ---
 
@@ -40,28 +49,71 @@ Verdict: a high-quality prototype with a top-tier retrieval core, one architectu
 
 ✅ solid · 🟡 partial/weak · ❌ absent.
 
-| Capability | ATHENA | Gemini DR | Perplexity DR | ChatGPT DR |
+| Capability | ATHENA (v4) | Gemini DR | Perplexity DR | ChatGPT DR |
 |---|:---:|:---:|:---:|:---:|
 | Reflective agent loop | ✅ `controller.py` | ✅ | ✅ | ✅ |
-| **Mid-loop reading (read→re-query)** | ❌ (fetch is one late batch) | ✅ | ✅ | ✅ |
-| **Multi-hop citation chasing** | ❌ | ✅ | ✅ | ✅ |
+| **Mid-loop reading (read→re-query)** | ✅ `graph._read_top` + coverage ledger | ✅ | ✅ | ✅ |
+| **Multi-hop citation chasing** | ✅ `hop.py` (trust-gated) | ✅ | ✅ | ✅ |
 | Two-model claim verification | ✅ `verifier.py` | 🟡 | 🟡 | 🟡 |
-| **Entailment / cross-source consensus** | ❌ (cosine only) | 🟡 | 🟡 | 🟡 |
+| **Entailment / cross-source consensus** | ✅ `entail.py` + domain-clustered consensus | 🟡 | 🟡 | 🟡 |
+| **Honest hallucination metric + per-claim ledger** | ✅ `aggregate_risk` + claims UI (a differentiator) | 🟡 | 🟡 | 🟡 |
 | Span-level citations | ✅ `select_span` | 🟡 | ✅ | 🟡 |
-| Cross-run memory | 🟡 `memory.py` (run-summary) | ✅ | 🟡 | ✅ |
-| **Editable research plan (pre-run)** | ❌ | ✅ | 🟡 | ❌ |
-| **Streaming report tokens / live `<think>`** | ❌ (report at `done`) | ✅ | ✅ | ✅ |
+| Cross-run memory | ✅ `memory.py` + GraphRAG (opt-in) | ✅ | 🟡 | ✅ |
+| **Editable research plan (pre-run)** | ✅ `/api/plan` + editable UI | ✅ | 🟡 | ❌ |
+| **Streaming report tokens / live `<think>`** | ✅ `stream_complete` + `report_delta`/`reasoning_delta` | ✅ | ✅ | ✅ |
+| Source authority + recency weighting | ✅ tiered allowlist + `recency_query` | ✅ | ✅ | ✅ |
+| **Prompt-injection / SSRF hardening** | ✅ fence-neutralized + redirect/peer-IP guards | ✅ | ✅ | ✅ |
+| Faithfulness + citation eval + regression gate | ✅ `eval/metrics.py` (RAGAS + ALCE) | n/a | n/a | n/a |
 | **Code interpreter / data analysis** | ❌ | 🟡 | ❌ | ✅ |
-| **Multimodal (images/charts) + PDF read** | ❌ (`trafilatura` text-only) | ✅ | 🟡 | ✅ |
-| Source authority + recency weighting | ❌ (trust inert) | ✅ | ✅ | ✅ |
+| **Multimodal (images/charts) + PDF read** | 🟡 PDF text+tables (pypdf layout); images ❌ | ✅ | 🟡 | ✅ |
 | Server-backed history + follow-up | ❌ (localStorage, one-shot) | ✅ | ✅ | ✅ |
-| **Auth / multi-tenant / per-user keys** | ❌ | ✅ | ✅ | ✅ |
-| **Prompt-injection / SSRF hardening** | ❌ / 🟡 | ✅ | ✅ | ✅ |
-| Working regression eval | ❌ (broken query) | n/a | n/a | n/a |
+| **Auth / multi-tenant / per-user keys** | 🟡 shared-token gate; per-run/RLS deferred | ✅ | ✅ | ✅ |
+| **Durable queue / multi-worker bus** | 🟡 in-process bus (SSE resumes); no durable queue | ✅ | ✅ | ✅ |
 
 ---
 
-## 4. Prioritized Recommendations
+## 3.5 v3 findings — current status (v4)
+
+✅ resolved · 🟡 partial / deferred · ❌ open. **This supersedes the per-item §4 list** (kept below as the original v3 audit, for historical record).
+
+| v3 item | Status | Note |
+|---|:--:|---|
+| F1 eval harness broken | ✅ | reads `quality_score` from `research_runs`; + faithfulness/citation metrics (see C6) |
+| F2 SSRF redirect / DNS-rebind | ✅ | manual per-hop re-validation + peer-IP check (`fetch.py`) |
+| F3 prompt-injection unguarded | ✅ | fence delimiters neutralized in every untrusted path (`synthesizer._sanitize_untrusted`) |
+| F4 negative results cached 24h | ✅ | empty/failed cached ~600s (`registry.multi_search`) |
+| F5 citation fallback masks hallucinations | ✅ | uncited / out-of-range = unsupported; + write-time grounding gate (`guard.enforce_grounding`) |
+| F8 relevance threshold empties set | ✅ | `min_keep` + absolute 0.15 floor (`relevance.filter_by_relevance`) |
+| F10 UI empty report on failure | ✅ | `report_ready` + inline fallback + error card (`graph.py`/`page.tsx`) |
+| F7 URL under-canonicalization | 🟡 | redirect-key-tolerant assembly added; base `url_hash` canonicalization unchanged |
+| F6 RRF mutates input hits | 🟡 | not re-verified this cycle |
+| F9 cancel doesn't truly cancel | ❌ | open |
+| F11 citation popovers inaccessible | ❌ | open |
+| C1 mid-loop reading + coverage ledger | ✅ | `graph._read_top` + `coverage.py` |
+| C2 streaming + usage + reasoning | ✅ | `stream_complete`, usage box, `reasoning_delta` |
+| C3 entailment + cross-source consensus | ✅ | `entail.py` + domain-clustered consensus (`guard._domain`) |
+| C4 credibility + recency model | ✅ | tiered registered-domain allowlist + `select.recency_query` |
+| C7 stop discarding long docs | ✅ | all-chunk ranking + wider rerank pool (`rag.build_evidence`) |
+| C6 eval rigor | 🟡 | citation metric + regression gate ✅; a fixed independent judge still TODO |
+| C5 query fan-out + specialists | 🟡 | fan-out + recency variant + specialist seeding; news/academic providers not added |
+| C9 dedup + freshness | 🟡 | title-dedup + redirect-tolerance + recency; semantic/body-hash dedup TODO |
+| C8 durable queue + Redis bus | ❌ | open (in-process bus; SSE now resumes/reconnects) |
+| N1 editable research plan | ✅ | `/api/plan` + editable UI |
+| N2 streaming tokens / reasoning trace | ✅ | live draft + reasoning trace |
+| N5 multi-hop citation chasing | ✅ | `hop.py` + trust gate |
+| N8 conflict reporting + claims persistence | ✅ | `persist_claims` + per-claim ledger UI + conflict display |
+| N9 knowledge-graph memory | 🟡 | GraphRAG opt-in (`graphmem.py`) |
+| N4 multimodal + PDF | 🟡 | PDF text+tables (pypdf layout mode); images/charts not described |
+| N6 auth + per-user keys + RLS | 🟡 | shared-token gate; per-run/per-user keys + RLS deferred |
+| N3 sandboxed code interpreter | ❌ | open |
+| N7 server-backed history + follow-up | ❌ | open (localStorage) |
+| N10 private-workspace integration | ❌ | open |
+
+---
+
+## 4. Prioritized Recommendations  *(original v3 audit — historical; see §3.5 for current status)*
+
+> The FIX/CHANGE/NEW items below are the **original v3 audit** and are retained verbatim for traceability. Most FIX items and the core CHANGE/NEW depth+trust items are now **resolved** — consult §3.5 for the live status of each.
 
 Effort **S** ≤½d · **M** 1–3d · **L** ≥1wk. Impact High/Med/Low.
 
@@ -170,18 +222,21 @@ Replace `runs.py` fire-and-forget + `events.py` in-memory bus with a worker (arq
 
 ---
 
-## 6. Suggested Roadmap
+## 6. Suggested Roadmap (v4 — current)
 
-**NOW (days) — correctness, trust, safety; low risk**
-F1 eval-column fix · F5 citation fallback · F7 url canonicalization · F8 relevance floor · F4 negative-cache TTL · F6 RRF copy · C4 credibility+recency · F2 SSRF redirect validation · F3 injection delimiting · F10/F11 UI error + accessible citations.
+**DONE** (v3 NOW + most of NEXT, via the 5-improvement upgrade + Milestones A–D): F1/F2/F3/F4/F5/F8/F10 fixes · C1 mid-loop reading + coverage · C2 streaming + usage + reasoning · C3 entailment/consensus · C4 credibility + recency · C6 citation metric + regression gate · C7 all-chunk ranking · N1 editable plan · N2 streaming tokens · N5 multi-hop · N8 conflict reporting + claims persistence — **plus** the honest-measurement + write-time grounding + degraded-disclosure trust layer. Backend 384 / frontend 55 tests green.
 
-**NEXT (weeks) — the deep-research leap + measurability**
-C1 mid-loop reading + N8 coverage/claims · N1 editable plan · C2+N2 streaming + usage + reasoning trace · C3 entailment/consensus · C5 query fan-out + specialist adapter · C6 eval rigor (independent judge, citation metric, gate, topics) · F9 real cancel.
+**NOW (small, still open):** F9 real cancel · F11 accessible citation popovers · F6/F7 RRF-copy + URL canonicalization · urlhealth soft-404 detection · charset-aware decode · shared claim filter (`verifier`/`entail`).
 
-**LATER (1–2 months) — capability + scale + multi-tenant**
-N4 multimodal/PDF · N3 sandboxed code interpreter · N5 multi-hop chasing · N6 auth/RLS/limits · C8 durable queue + Redis bus · N7 server history + follow-up · C7/C9 chunking + dedup/freshness · N9 knowledge graph · N10 workspace integration.
+**NEXT (measurability + capability):** C6 a fixed *independent* eval judge · the live `<10%`-across-models eval run (needs API key + DB) · C5 news/academic providers · SSE per-run stream token · `provider_health` in run metadata.
+
+**LATER (scale + breadth):** N3 sandboxed code interpreter · N4 image/figure understanding (PDF text+tables already done) · N6 multi-tenant auth + per-user keys + RLS + rate/cost limits · C8 durable queue + Redis bus · N7 server-backed history + follow-up · C9 semantic/body-hash dedup · N9 deeper knowledge-graph memory · N10 private-workspace integration.
+
+**The moat to protect:** verifiable, auditable trust — now honest end-to-end (pre-verifier measurement, NLI grounding, degraded-run disclosure, per-claim ledger, regression-gated eval). Don't trade it for breadth.
 
 ---
 
 ### Appendix — coverage
-Every file under `services/api/athena/{agents,search,gateway,api,eval}`, plus `embed.py, rag.py, fetch.py, tokens.py, memory.py, cache.py, db.py, config.py, report/export.py`, all `migrations/*.sql`, `Dockerfile`, `docker-compose.yml`, `DEPLOY.md`; and `apps/web/{app/*, components/**, lib/*}`. Findings cross-checked by four independent subsystem audits; the eval-column and reports-schema bug verified directly against `migrations/001_init.sql`/`004_eval.sql`.
+Every file under `services/api/athena/{agents,search,gateway,api,eval}`, plus `embed.py, rag.py, fetch.py, tokens.py, memory.py, cache.py, db.py, config.py, report/export.py`, all `migrations/*.sql`, `Dockerfile`, `docker-compose.yml`, `DEPLOY.md`; and `apps/web/{app/*, components/**, lib/*}`. Findings cross-checked by independent subsystem audits.
+
+**v4 verification:** the trust/quality overhaul (Milestones A–D) was implemented test-first and reviewed by an independent correctness+security subagent pass — **no CRITICAL/HIGH issues** (SQLi, prompt-injection, SSRF, auth/IDOR, ReDoS, secrets all clean). Current baseline: **backend 384 passed, frontend `tsc` clean + 55 vitest passed.** Per-step detail in `docs/RESEARCH-QUALITY-ROADMAP.md`.
