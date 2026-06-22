@@ -18,3 +18,11 @@ test("badges a dead source link from the trust ledger url_status", () => {
     urlStatus={{ "https://gone.com": "dead" }} />);
   expect(screen.getByText("dead link")).toBeInTheDocument();
 });
+
+test("does not render a clickable link for a dead source (P3)", () => {
+  render(<SourceList
+    sources={[{ url: "https://gone.example/x", title: "Gone Page", source_type: "web", round: 1 }]}
+    urlStatus={{ "https://gone.example/x": "dead" }} />);
+  expect(screen.getByText("Gone Page")).toBeInTheDocument();                       // still shown...
+  expect(screen.queryByRole("link", { name: /Gone Page/ })).not.toBeInTheDocument();  // ...but NOT clickable
+});

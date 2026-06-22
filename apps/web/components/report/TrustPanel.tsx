@@ -73,6 +73,12 @@ function TrustSummary({ trust }: { trust: Trust }) {
 
 export function TrustPanel({ flagged, trust }: { flagged: string[]; trust?: Trust }) {
   const hasSummary = !!trust && !!trust.engine && trust.engine !== "none";
+  const e = trust?.engine;
+  const claimsChecked = (trust?.supported ?? 0) + (trust?.refuted ?? 0) + (trust?.nei ?? 0);
+  // The all-clear may ONLY show when the entailment judge actually ran on cited claims. A cosine-only
+  // fallback (engine "embedding") or a run with nothing checked must not read as "fully verified".
+  const verified = e === "entailment" && claimsChecked > 0;
+  const degraded = trust?.assurance === "reduced" || (!!e && e !== "entailment");
   return (
     <div className="card flex flex-col gap-3" aria-label="verification and trust">
       <div className="flex items-center justify-between">
@@ -80,10 +86,31 @@ export function TrustPanel({ flagged, trust }: { flagged: string[]; trust?: Trus
         <span className="tag">{flagged.length} flagged</span>
       </div>
       {hasSummary && <TrustSummary trust={trust!} />}
-      {flagged.length === 0 ? (
-        <p className="text-sm" style={{ color: "var(--muted)" }}>
-          ✓ Every cited claim was checked for entailment, cross-source agreement, and a live source link — none were left unsupported.
+      {!!trust?.conflict_items?.length && (
+        <div className="flex flex-col gap-1" style={{ fontSize: 13 }}>
+          <span style={{ color: "#C084FC", fontWeight: 600 }}>Cross-source conflicts</span>
+          <ul className="flex flex-col gap-1" style={{ paddingLeft: 16, color: "var(--muted)", listStyle: "disc" }}>
+            {trust!.conflict_items!.slice(0, 6).map((c, i) => (
+              <li key={i} style={{ wordBreak: "break-word" }}>{c}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {degraded && (
+        <p className="text-sm" role="status" style={{ color: "#FBBF24" }}>
+          ⚠ Reduced assurance: similarity-only grounding (no per-claim NLI verdicts) — treat this result as less certain.
         </p>
+      )}
+      {flagged.length === 0 ? (
+        verified ? (
+          <p className="text-sm" style={{ color: "var(--muted)" }}>
+            ✓ Every cited claim got an entailment verdict, a cross-source agreement check, and a live-link probe — none were left unsupported.
+          </p>
+        ) : (
+          <p className="text-sm" style={{ color: "var(--muted)" }}>
+            Not independently verified — the per-claim entailment judge did not run on this report.
+          </p>
+        )
       ) : (
         <ul className="flex flex-col gap-2">
           {flagged.map((item, i) => {

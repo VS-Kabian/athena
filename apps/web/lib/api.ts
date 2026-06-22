@@ -50,6 +50,10 @@ export async function getRun(id: string) {
   const r = await fetch(`${BASE}/api/research/${id}`, { headers: authHeaders() });
   return jsonOrThrow(r);
 }
+export async function getClaims(id: string): Promise<{ claims: import("./types").Claim[] }> {
+  const r = await fetch(`${BASE}/api/research/${id}/claims`, { headers: authHeaders() });
+  return jsonOrThrow(r);
+}
 
 export type SavedKey = { provider: string; set: boolean; masked: string };
 export async function getKeys(): Promise<SavedKey[]> {

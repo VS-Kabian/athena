@@ -52,8 +52,14 @@ class EventBus:
         if event.get("type") in _TERMINAL:
             self._cancelled.discard(run_id)
 
-    async def subscribe(self, run_id: str):
-        i = 0   # absolute event index across the run's lifetime (survives ring-buffer drops)
+    async def subscribe_seq(self, run_id: str, last_event_id: int | None = None):
+        """Yield ``(seq, event)`` where ``seq`` is the event's absolute index (the SSE ``id:``).
+        ``last_event_id`` resumes AFTER that index, so a reconnecting client receives only NEWER events
+        instead of replaying the whole backlog (which would re-append every source, double counters, ...)."""
+        # absolute event index across the run's lifetime (survives ring-buffer drops). A resume starts
+        # just past the last id the client confirmed; the offset clamp below handles a resume point that
+        # already fell out of the ring buffer.
+        i = 0 if last_event_id is None else max(int(last_event_id) + 1, 0)
         while True:
             if run_id in self._evicted and not self._backlog.get(run_id):
                 return   # run's backlog was FIFO-evicted -> nothing left to deliver; end the stream cleanly
@@ -63,8 +69,9 @@ class EventBus:
             backlog = self._backlog.get(run_id, [])
             while i - off < len(backlog):
                 ev = backlog[i - off]
+                seq = i
                 i += 1
-                yield ev
+                yield seq, ev
                 if ev["type"] in _TERMINAL:
                     self._cancelled.discard(run_id)
                     return
@@ -74,6 +81,11 @@ class EventBus:
             if i - self._offset.get(run_id, 0) < len(cur):   # publish raced our clear -> don't sleep
                 continue
             await evt.wait()
+
+    async def subscribe(self, run_id: str):
+        """Backward-compatible bare-event stream (replays from the start)."""
+        async for _seq, ev in self.subscribe_seq(run_id):
+            yield ev
 
     def cancel(self, run_id: str): self._cancelled.add(run_id)
     def is_cancelled(self, run_id: str) -> bool: return run_id in self._cancelled

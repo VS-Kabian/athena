@@ -1,5 +1,5 @@
 import asyncio, hmac, json, uuid
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
@@ -97,16 +97,26 @@ async def start_research(req: ResearchReq):
     return {"run_id": run_id}
 
 @public_router.get("/research/{run_id}/stream")
-async def stream(run_id: str, token: str | None = None):
+async def stream(run_id: str, request: Request, token: str | None = None,
+                 lastEventId: str | None = None):
     # EventSource can't send an Authorization header, so the token rides as ?token=... . Enforce it
     # (constant-time) whenever one is configured, so a run_id alone can't read another run's stream.
     expected = settings.athena_api_token
     if expected and not (token and hmac.compare_digest(token, expected)):
         raise HTTPException(status_code=401, detail="Missing or invalid stream token.")
 
+    # Resume support (P2-5): browsers auto-send `Last-Event-ID` on their own reconnect; our manual JS
+    # reconnect passes `?lastEventId=`. Honor either so a reconnect resumes instead of replaying the
+    # whole backlog (which doubles sources/counters). Non-int -> start from the beginning.
+    raw = request.headers.get("Last-Event-ID") or lastEventId
+    try:
+        last_id = int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        last_id = None
+
     async def gen():
-        async for ev in bus.subscribe(run_id):
-            yield {"event": ev["type"], "data": json.dumps(ev["data"])}
+        async for seq, ev in bus.subscribe_seq(run_id, last_event_id=last_id):
+            yield {"id": str(seq), "event": ev["type"], "data": json.dumps(ev["data"])}
     return EventSourceResponse(gen())
 
 @router.post("/research/{run_id}/cancel")
@@ -141,17 +151,37 @@ async def get_run(run_id: str):
             "trust": _j(r0["trust"], {}) if r0 else {},
             "sources": [dict(s) for s in srcs]}
 
+@router.get("/research/{run_id}/claims")
+async def get_claims(run_id: str):
+    """Per-claim entailment verdicts (the audit trail) persisted by persist_claims (P1-7). Conflicts and
+    low-confidence claims surface first. 404 only when the run is unknown; an empty list is a valid 200."""
+    run = await fetch("select id from research_runs where id=$1", run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    rows = await fetch(
+        "select text, verdict, confidence, conflict from claims "
+        "where run_id=$1 order by conflict desc, confidence asc nulls last", run_id)
+    return {"claims": [
+        {"text": r["text"], "verdict": r["verdict"],
+         "confidence": float(r["confidence"]) if r["confidence"] is not None else None,
+         "conflict": bool(r["conflict"])}
+        for r in rows]}
+
 @router.get("/research/{run_id}/report.md")
 async def report_md(run_id: str):
     rep = await fetch("select markdown from reports where run_id=$1 order by created_at desc limit 1", run_id)
-    md = rep[0]["markdown"] if rep else "# No report"
+    if not rep or not rep[0]["markdown"]:
+        raise HTTPException(status_code=404, detail="No report for this run")   # don't save a placeholder as a "report" (P3)
+    md = rep[0]["markdown"]
     return Response(to_markdown_bytes(md), media_type="text/markdown",
                     headers={"Content-Disposition": f'attachment; filename="report-{run_id}.md"'})
 
 @router.get("/research/{run_id}/report.pdf")
 async def report_pdf(run_id: str):
     rep = await fetch("select markdown from reports where run_id=$1 order by created_at desc limit 1", run_id)
-    md = rep[0]["markdown"] if rep else "# No report"
+    if not rep or not rep[0]["markdown"]:
+        raise HTTPException(status_code=404, detail="No report for this run")
+    md = rep[0]["markdown"]
     # offload the synchronous CPU/IO-heavy PDF render to a worker thread so it can't block the loop
     pdf = await asyncio.to_thread(to_pdf_bytes, md)
     return Response(pdf, media_type="application/pdf",

@@ -19,8 +19,29 @@ def _seed_providers(hits: list[SearchHit]) -> None:
             hits[i] = dataclasses.replace(h, providers=[h.provider])
 
 
+def _retry_after_seconds(e) -> float | None:
+    """Classify a provider HTTP error for retry (P1-8). For a 429/5xx, return a BOUNDED backoff that
+    honors a `Retry-After` header (so a rate-limited but recoverable provider isn't silently dropped).
+    For a hard 4xx (404/403/401), return -1.0 (do NOT retry — it won't recover). Otherwise None
+    (unknown error → use the default short backoff)."""
+    resp = getattr(e, "response", None)
+    code = getattr(resp, "status_code", None)
+    if code is None:
+        return None
+    if code == 429 or code >= 500:
+        try:
+            ra = float((getattr(resp, "headers", None) or {}).get("Retry-After", ""))
+        except (TypeError, ValueError):
+            ra = 0.0
+        return min(ra if ra > 0 else 0.8, 5.0)   # bounded so a hostile Retry-After can't stall the run
+    if 400 <= code < 500:
+        return -1.0                              # hard client error -> not retryable
+    return None
+
+
 async def _safe(provider, query, k):
-    # one quick retry on a transient error (a timeout already waited 8s, so don't retry that)
+    # one quick retry on a transient error (a timeout already waited 8s, so don't retry that). A 429/5xx
+    # backs off honoring Retry-After; a hard 4xx is not retried.
     for attempt in range(2):
         try:
             return await asyncio.wait_for(provider.search(query, k), timeout=8)
@@ -28,10 +49,11 @@ async def _safe(provider, query, k):
             log.warning("search provider %s timed out", getattr(provider, "name", "?"))
             return []
         except Exception as e:
-            if attempt == 1:
+            backoff = _retry_after_seconds(e)
+            if attempt == 1 or backoff == -1.0:
                 log.warning("search provider %s failed: %s", getattr(provider, "name", "?"), e)
                 return []
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(backoff if backoff is not None else 0.4)
 
 
 async def multi_search(query: str, providers: list, mode: str = "broadcast", k: int = 10) -> list[SearchHit]:

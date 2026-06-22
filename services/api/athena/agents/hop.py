@@ -30,6 +30,8 @@ MAX_LINKS_PER_PAGE = 40
 MAX_HOPS_PER_ROUND = 5    # bounded 2nd-hop fetches per chase
 PARENT_N = 6              # harvest links from the strongest N already-read sources
 REL_FLOOR = 0.45         # drop off-topic chased pages (mirrors specialist seeding)
+TRUST_FLOOR = 0.40       # 2nd-hop pages are less-vetted -> require modest domain authority too (P2-8),
+                         # so a low-authority/penalized chased page can't slip into the pool on relevance alone
 
 
 def _classify(url: str) -> str:
@@ -148,6 +150,8 @@ async def chase(run_id: str, topic: str, all_hits: dict, rnd: int,
         h.relevance = rel
         stype = _classify(h.url)
         trust = score_source(h.url, h.title)
+        if trust < TRUST_FLOOR:
+            continue   # P2-8: a less-vetted 2nd-hop page must clear a modest authority bar, not relevance alone
         valid = is_validated(h.url, h.title) and rel >= 0.4
         sq = subq_by_key.get(key, "")
         all_hits[key] = {"hit": h, "round": rnd, "source_type": stype, "trust": trust,

@@ -1,6 +1,23 @@
 import re
+from datetime import datetime, timezone
 
 _YEAR_OLD = re.compile(r"\b20(1[0-9]|2[0-3])\b")  # 2010-2023
+
+# topics that ask for the CURRENT/LATEST state, pricing, releases, or a recent year are time-sensitive:
+# retrieval should bias toward fresh sources for them (P1-6).
+_TIME_SENSITIVE = re.compile(
+    r"\b(latest|newest|current|currently|recent|recently|today|this year|right now|nowadays|"
+    r"20(2[4-9]|3[0-9])|pric(e|es|ing)|cost|release[ds]?|launch(ed|es)?|state of the art|sota|"
+    r"trend|trends|upcoming|as of)\b", re.I)
+
+
+def recency_query(question: str) -> str | None:
+    """A recency-biased query variant for a time-sensitive question (latest/current state, pricing,
+    releases, a recent year, ...), else None — so retrieval surfaces fresh sources instead of stale
+    top-ranked pages. Year is taken from the clock so it never goes stale."""
+    if not question or not _TIME_SENSITIVE.search(question):
+        return None
+    return f"{question} latest {datetime.now(timezone.utc).year}"
 
 
 def _freshness(title: str, url: str) -> float:
@@ -69,17 +86,28 @@ def select_sources(all_hits: dict, n: int = 20, entities: list[str] | None = Non
     return selected[:n]
 
 
-def assemble_content(selected: list[dict], docs: dict) -> dict:
-    content = {}
+def assemble_content(selected: list[dict], docs: dict, *, with_provenance: bool = False):
+    """Per-source content for synthesis: specialist/extracted content > fetched page > snippet fallback.
+
+    Tolerant of redirect-canonicalized fetch keys — ``fetch_many`` follows redirects, so a page can come
+    back under a normalized URL; we fall back to a normalized lookup so a selected source whose full page
+    WAS fetched is never silently assembled from its one-line snippet (which would weaken grounding).
+
+    With ``with_provenance=True`` also returns a parallel ``{url: 'full'|'fetched'|'snippet'}`` map so
+    callers can down-weight snippet-only sources, which shouldn't carry full citation authority."""
+    norm = {u.rstrip("/").lower(): t for u, t in docs.items()}
+    content: dict = {}
+    provenance: dict = {}
     for e in selected:
         url = e["hit"].url
+        fetched = docs.get(url) or norm.get(url.rstrip("/").lower())
         if e.get("content"):
-            content[url] = e["content"]
-        elif docs.get(url):
-            content[url] = docs[url]
+            content[url] = e["content"]; provenance[url] = "full"
+        elif fetched:
+            content[url] = fetched; provenance[url] = "fetched"
         elif e["hit"].snippet:
-            content[url] = e["hit"].snippet
-    return content
+            content[url] = e["hit"].snippet; provenance[url] = "snippet"
+    return (content, provenance) if with_provenance else content
 
 
 def _title_sig(title: str) -> set:

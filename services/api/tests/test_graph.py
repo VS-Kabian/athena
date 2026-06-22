@@ -154,7 +154,7 @@ async def test_factcheck_runs_off_the_event_loop_thread():
     event loop (and starve other concurrent runs)."""
     main_thread = threading.current_thread().ident
     seen = {}
-    def rec_factcheck(md, srcs):
+    def rec_factcheck(md, srcs, *args, **kwargs):   # tolerate threshold/evidence_chunks (P1-2 signature)
         seen["thread"] = threading.current_thread().ident
         return {"risk": 0.0, "total": 1, "unsupported": 0, "flagged": []}
     hits = [SearchHit("https://a.com", "A", "s", 0, "ddg")]

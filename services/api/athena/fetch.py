@@ -15,17 +15,29 @@ log = get_logger(__name__)
 MIN_TEXT_LEN = 200   # below this, static extraction is considered "thin" and worth a JS retry
 
 
+def _page_text(page) -> str:
+    """One PDF page's text, preferring pypdf's LAYOUT mode — it preserves columns/tables (where benchmark
+    numbers live) far better than the default flatten — and gracefully falling back to plain extraction
+    when the installed pypdf is too old to support `extraction_mode` (P2-6). No new dependency."""
+    try:
+        t = page.extract_text(extraction_mode="layout")
+        if t and t.strip():
+            return t.strip()
+    except Exception:
+        pass
+    try:
+        return (page.extract_text() or "").strip()
+    except Exception:
+        return ""
+
+
 def _extract_pdf(data: bytes, max_pages: int = 40) -> str | None:
-    """Extract text from a PDF byte stream (pypdf). Returns None on any failure / no text —
+    """Extract text from a PDF byte stream (pypdf, layout-aware). Returns None on any failure / no text —
     so a malformed or image-only PDF never crashes a fetch."""
     try:
         from pypdf import PdfReader
         reader = PdfReader(io.BytesIO(data))
-        parts = []
-        for page in reader.pages[:max_pages]:
-            t = (page.extract_text() or "").strip()
-            if t:
-                parts.append(t)
+        parts = [t for page in reader.pages[:max_pages] if (t := _page_text(page))]
         return "\n\n".join(parts).strip() or None
     except Exception:
         return None

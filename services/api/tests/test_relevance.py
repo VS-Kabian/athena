@@ -52,5 +52,54 @@ def test_min_keep_floor_prevents_empty_result():
 
     with patch("athena.search.relevance.rerank", side_effect=fake_rerank):
         kept = filter_by_relevance("q", hits)
-    assert len(kept) >= 1                       # never starved to empty
+    assert len(kept) >= 1                       # never starved to empty (best score 0.27 clears the floor)
     assert kept[0].url == "https://c.com"       # best score (-1.0) first
+
+
+def test_min_keep_floor_drops_wholly_offtopic_batch():
+    # P3: when EVERY candidate is far below relevance, return nothing rather than force-feeding junk
+    hits = [mk("https://a.com", "x"), mk("https://b.com", "y")]
+
+    def fake_rerank(q, passages):
+        return [-8.0, -7.0]                     # sigmoids ~0.0003 / 0.0009 -> below the absolute floor
+
+    with patch("athena.search.relevance.rerank", side_effect=fake_rerank):
+        kept = filter_by_relevance("q", hits)
+    assert kept == []                           # wholly off-topic batch -> no junk forced into the pipeline
+
+
+# ── P1-3: content-aware re-ranking on fetched page bodies ──
+def test_content_relevance_rescores_on_body_and_returns_unit_scores():
+    from athena.search import relevance
+    relevance._SCORE_CACHE.clear()
+    with patch("athena.search.relevance.rerank", return_value=[6.0, -6.0]):
+        scores = relevance.content_relevance("langgraph", ["LangGraph runtime body", "unrelated cooking body"])
+    assert scores is not None and len(scores) == 2
+    assert all(0.0 <= s <= 1.0 for s in scores)
+    assert scores[0] > 0.9 and scores[1] < 0.1   # sigmoid-shaped, on-topic body ranked far above off-topic
+
+
+def test_content_relevance_none_when_reranker_unavailable():
+    from athena.search import relevance
+    relevance._SCORE_CACHE.clear()
+    with patch("athena.search.relevance.rerank", return_value=[]):   # reranker down -> caller keeps prior relevance
+        assert relevance.content_relevance("topic", ["some fetched body text"]) is None
+
+
+def test_content_relevance_empty_input_returns_empty():
+    from athena.search import relevance
+    assert relevance.content_relevance("topic", []) == []
+
+
+def test_content_relevance_truncates_long_body():
+    from athena.search import relevance
+    relevance._SCORE_CACHE.clear()
+    seen = {}
+
+    def spy(q, passages):
+        seen["len"] = len(passages[0])
+        return [3.0]
+
+    with patch("athena.search.relevance.rerank", side_effect=spy):
+        relevance.content_relevance("topic", ["B" * 9000])
+    assert seen["len"] <= relevance._CONTENT_MAX   # body trimmed before the cross-encoder

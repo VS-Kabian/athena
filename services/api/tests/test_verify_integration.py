@@ -54,16 +54,16 @@ async def test_verifier_runs_and_emits_event():
 
 
 @pytest.mark.asyncio
-async def test_no_verifier_skips_verification():
+async def test_no_verifier_uses_fallback_verification():
     events = []
     with ExitStack() as st:
         for p in _patches(events):
             st.enter_context(p)
-        with patch("athena.agents.graph.verify_report", AsyncMock()) as vr:
+        with patch("athena.agents.graph.verify_report", AsyncMock(return_value=("# R", []))) as vr:
             await run_research("r", "t", rounds=1,
                                llm={"provider": "deepseek", "model": "w", "api_key": "k"}, **COMMON)
-    vr.assert_not_called()
-    assert not any(e["type"] == "verify" for e in events)
+    vr.assert_awaited_once()
+    assert any(e["type"] == "verify" for e in events)
 
 
 @pytest.mark.asyncio

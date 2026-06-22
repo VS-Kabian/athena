@@ -28,12 +28,20 @@ export function SourceList({ sources, urlStatus = {} }: { sources: ReportSource[
           </div>
           <ul className="flex flex-col gap-1">
             {items.map((s) => {
-              const badge = STATUS_BADGE[urlStatus[s.url]];
+              const status = urlStatus[s.url];
+              const badge = STATUS_BADGE[status];
+              const dead = status === "dead";
+              const label = `${s.validated ? "✓ " : ""}${s.title || s.url}`;
               return (
                 <li key={s.url} className="text-sm">
-                  <a href={safeHref(s.url)} target="_blank" rel="noreferrer" className="hover:underline">
-                    {s.validated ? "✓ " : ""}{s.title || s.url}
-                  </a>
+                  {dead ? (
+                    // a dead/fabricated citation URL is NOT made clickable — clicking it just hits a broken
+                    // page; render it as plain struck-through text so the reader sees it was a source but gone (P3).
+                    <span style={{ color: "var(--faint)", textDecoration: "line-through" }}
+                      title="This source URL is dead — not linked">{label}</span>
+                  ) : (
+                    <a href={safeHref(s.url)} target="_blank" rel="noreferrer" className="hover:underline">{label}</a>
+                  )}
                   <span className="text-xs ml-2" style={{ color: "var(--muted)" }}>R{s.round}</span>
                   {badge && (
                     <span className="text-xs ml-2" style={{

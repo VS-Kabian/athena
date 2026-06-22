@@ -66,19 +66,21 @@ def chunk_text(text: str, size: int = 1200, overlap: int = 150) -> list[str]:
 
 
 def build_evidence(topic: str, docs: dict[str, str], meta: dict | None = None,
-                   k: int = 32, per_doc_cap: int = 3) -> list[dict]:
+                   k: int = 32, per_doc_cap: int = 3, rerank_cap: int = 96) -> list[dict]:
     """Rank source chunks for the report.
 
-    1) embed-rank all chunks (fast), 2) cross-encoder RERANK the top candidates for sharp
-    precision (off-topic chunks score strongly negative and drop out), 3) reserve the best
-    chunk of up to 2 sources per authoritative type (paper/github/docs), 4) fill by score.
-    Falls back to embedding-only ranking if the reranker is unavailable.
+    1) embed-rank ALL chunks (P1-1 — no positional truncation, so a relevant passage deep in a long
+    source isn't dropped before ranking), 2) cross-encoder RERANK the top ``rerank_cap`` candidates for
+    sharp precision (off-topic chunks score strongly negative and drop out), 3) reserve the best chunk of
+    up to 2 sources per authoritative type (paper/github/docs), 4) fill by score. Falls back to
+    embedding-only ranking if the reranker is unavailable.
     `meta`: {url: {"trust": float, "source_type": str}}.
     """
     meta = meta or {}
     items = []
     for url, text in docs.items():
-        chs = chunk_text(text)[:8]
+        chs = chunk_text(text)[:64]   # rank deep chunks too (was a too-tight [:8]); cap bounds embed cost
+                                      # on pathological pages — rerank_cap then bounds the cross-encoder
         if not chs:
             continue
         vecs = embed_passages(chs)
@@ -95,8 +97,8 @@ def build_evidence(topic: str, docs: dict[str, str], meta: dict | None = None,
         it["emb"] = cosine(qv, it["vec"])
     items.sort(key=lambda x: x["emb"], reverse=True)
 
-    # cross-encoder rerank the top embedding candidates
-    cand = items[:48]
+    # cross-encoder rerank the top embedding candidates (pool widened + configurable, P1-1)
+    cand = items[:rerank_cap]
     rr = rerank(topic, [it["text"] for it in cand])
     if rr and len(rr) == len(cand):
         for it, s in zip(cand, rr):

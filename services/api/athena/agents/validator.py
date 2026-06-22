@@ -51,10 +51,15 @@ def score_source(url: str, title: str = "") -> float:
         score += 0.08
     if any(host.endswith(t) for t in TIER_A_TLDS) or _registered_match(host, TIER_A_DOMAINS):
         score += 0.42
-    elif _registered_match(host, TIER_B_DOMAINS) or host.startswith("docs.") or "/docs" in path:
+    elif _registered_match(host, TIER_B_DOMAINS):
         score += 0.30
     elif _registered_match(host, TIER_C_DOMAINS):
         score += 0.20
+    elif host.startswith("docs.") or "/docs" in path:
+        # documentation-SHAPED but UNRECOGNIZED host: a small modifier only, never a Tier grant — so a
+        # `docs.` subdomain or `/docs` path on a random domain (e.g. docs.spam-blog.com) can't reach the
+        # validation bar on that alone (P2-4). Recognized docs domains validate via the Tier-B allowlist.
+        score += 0.10
     if any(s in host for s in SOCIAL):
         score -= 0.40
     if any(j in blob for j in JUNK):

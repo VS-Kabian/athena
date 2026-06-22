@@ -1,6 +1,31 @@
 import pytest, respx, httpx
 from unittest.mock import patch, AsyncMock
-from athena.fetch import _is_safe_url, fetch_extract
+from athena.fetch import _is_safe_url, fetch_extract, _extract_pdf
+
+
+def test_extract_pdf_prefers_layout_mode_for_tables():
+    # P2-6: layout mode preserves columnar/table structure (where benchmark numbers live)
+    class FakePage:
+        def extract_text(self, **kw):
+            return "Model   QPS\nA   900\nB   1200" if kw.get("extraction_mode") == "layout" else "flat"
+    class FakeReader:
+        def __init__(self, _data): self.pages = [FakePage()]
+    with patch("pypdf.PdfReader", FakeReader):
+        out = _extract_pdf(b"%PDF-fake")
+    assert "900" in out and "1200" in out and "QPS" in out   # the layout-extracted table survived
+
+
+def test_extract_pdf_falls_back_when_layout_unsupported():
+    # an older pypdf without `extraction_mode` raises -> we fall back to plain extraction (no crash)
+    class FakePage:
+        def extract_text(self, **kw):
+            if "extraction_mode" in kw:
+                raise TypeError("extraction_mode unsupported")
+            return "plain extracted body"
+    class FakeReader:
+        def __init__(self, _data): self.pages = [FakePage()]
+    with patch("pypdf.PdfReader", FakeReader):
+        assert _extract_pdf(b"%PDF") == "plain extracted body"
 
 
 @pytest.fixture(autouse=True)

@@ -20,10 +20,28 @@ test("renders a color-coded badge per flagged claim with a count", () => {
   expect(screen.getByText("2 flagged")).toBeInTheDocument();
 });
 
-test("shows a reassuring empty state when nothing is flagged", () => {
-  render(<TrustPanel flagged={[]} />);
+test("shows the all-clear only when the entailment judge actually verified the claims", () => {
+  render(<TrustPanel flagged={[]} trust={{ engine: "entailment", supported: 5, refuted: 0, nei: 0 }} />);
   expect(screen.getByText(/none were left unsupported/i)).toBeInTheDocument();
   expect(screen.getByText("0 flagged")).toBeInTheDocument();
+});
+
+test("does NOT show a false all-clear when no entailment verdict exists (P0-4)", () => {
+  render(<TrustPanel flagged={[]} />);   // no trust ledger -> the judge did not run
+  expect(screen.queryByText(/none were left unsupported/i)).not.toBeInTheDocument();
+  expect(screen.getByText(/not independently verified/i)).toBeInTheDocument();
+});
+
+test("shows a reduced-assurance banner for a similarity-only (cosine) run, and no all-clear", () => {
+  render(<TrustPanel flagged={[]} trust={{ engine: "embedding", supported: 3, refuted: 0, nei: 0 }} />);
+  expect(screen.getByText(/reduced assurance/i)).toBeInTheDocument();
+  expect(screen.queryByText(/none were left unsupported/i)).not.toBeInTheDocument();
+});
+
+test("does not show the all-clear when entailment checked zero claims", () => {
+  render(<TrustPanel flagged={[]} trust={{ engine: "entailment", supported: 0, refuted: 0, nei: 0 }} />);
+  expect(screen.queryByText(/none were left unsupported/i)).not.toBeInTheDocument();
+  expect(screen.getByText(/not independently verified/i)).toBeInTheDocument();
 });
 
 test("parseFlag classifies the entailment, conflict, and dead-link verdicts", () => {

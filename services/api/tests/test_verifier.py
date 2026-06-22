@@ -25,14 +25,26 @@ async def test_corrects_contradicted_and_flags_weak():
 
 
 @pytest.mark.asyncio
-async def test_weak_is_flagged_not_rewritten():
+async def test_weak_is_flagged_not_rewritten_when_no_correction():
     async def fake(*a, **k):
-        return '[{"n":1,"verdict":"weak","correction":""},{"n":2,"verdict":"supported","correction":""}]'
+        return '[{"n":1,"verdict":"weak","correction":null},{"n":2,"verdict":"supported","correction":""}]'
 
     with patch("athena.agents.verifier.complete", side_effect=fake):
         md, contested = await verify_report(MD, SRC, LLM)
-    assert "sky is green" in md                 # weak claims are not rewritten
+    assert "sky is green" in md                 # weak claims are not rewritten if correction is null/missing
     assert len(contested) == 1
+
+
+@pytest.mark.asyncio
+async def test_weak_is_softened_when_correction_provided():
+    async def fake(*a, **k):
+        return '[{"n":1,"verdict":"weak","correction":"The sky may be green [1]."},{"n":2,"verdict":"supported","correction":""}]'
+
+    with patch("athena.agents.verifier.complete", side_effect=fake):
+        md, contested = await verify_report(MD, SRC, LLM)
+    assert "The sky may be green [1]." in md and "sky is green" not in md
+    assert len(contested) == 1
+    assert any("corrected" in c.lower() for c in contested)
 
 
 @pytest.mark.asyncio

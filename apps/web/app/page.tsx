@@ -10,11 +10,12 @@ import { ReportView } from "@/components/report/ReportView";
 import { QualityBreakdown } from "@/components/report/QualityBreakdown";
 import { SourceList, type ReportSource } from "@/components/report/SourceList";
 import { TrustPanel } from "@/components/report/TrustPanel";
+import { ClaimsTable } from "@/components/report/ClaimsTable";
 import { DownloadBar } from "@/components/report/DownloadBar";
 import { CoveragePanel } from "@/components/research/CoveragePanel";
 import { useResearchStream } from "@/lib/sse";
-import { startResearch, cancelResearch, getRun, getPlan } from "@/lib/api";
-import type { LLMSpec, SearchSpec, Citation, QualityBreakdown as QB, Trust } from "@/lib/types";
+import { startResearch, cancelResearch, getRun, getPlan, getClaims } from "@/lib/api";
+import type { LLMSpec, SearchSpec, Citation, QualityBreakdown as QB, Trust, Claim } from "@/lib/types";
 
 export default function Home() {
   const [topic, setTopic] = useState("");
@@ -37,23 +38,59 @@ export default function Home() {
   const [breakdown, setBreakdown] = useState<QB | null>(null);
   const [flagged, setFlagged] = useState<string[]>([]);
   const [trust, setTrust] = useState<Trust | null>(null);
+  const [claims, setClaims] = useState<Claim[]>([]);
   const [startError, setStartError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [reportUnavailable, setReportUnavailable] = useState(false);
 
   useEffect(() => {
-    // only pull the report on success (or cancel — partial); never on a failed run (no report exists)
-    if ((stream.phase === "done" || stream.phase === "cancelled") && runId) getRun(runId).then((d) => {
-      setReport(d.report); setReportSources(d.sources ?? []);
-      setCitations(d.citations ?? []); setBreakdown(d.quality_breakdown ?? null);
-      setFlagged(d.flagged ?? []); setTrust(d.trust ?? null);
-    }).catch(() => {});   // transient fetch error: keep whatever's shown rather than blanking it
-  }, [stream.phase, runId]);
+    // Pull the report on success (or cancel — partial); never on a failed run. Retry with backoff so a
+    // finish-line DB blip doesn't show "Done" over a blank report, then fall back to the inline report the
+    // backend carried on the `done` event (P0-4). If all of that yields nothing, flag it unavailable.
+    if (stream.phase !== "done" && stream.phase !== "cancelled") return;
+    if (!runId || report) return;
+    let cancelled = false;
+    (async () => {
+      for (let attempt = 0; attempt < 3 && !cancelled; attempt++) {
+        try {
+          const d = await getRun(runId);
+          if (cancelled) return;
+          if (d && d.report) {
+            setReport(d.report); setReportSources(d.sources ?? []);
+            setCitations(d.citations ?? []); setBreakdown(d.quality_breakdown ?? null);
+            setFlagged(d.flagged ?? []); setTrust(d.trust ?? null); setReportUnavailable(false);
+            return;
+          }
+        } catch { /* transient — retry */ }
+        await new Promise((res) => setTimeout(res, 400 * (attempt + 1)));
+      }
+      if (cancelled) return;
+      const inl = stream.inlineReport;   // backend-carried fallback when the DB read never returned a report
+      if (inl && inl.markdown) {
+        setReport(inl.markdown); setReportSources([]);
+        setCitations(inl.citations ?? []); setBreakdown(inl.quality_breakdown ?? null);
+        setFlagged(inl.flagged ?? []); setTrust(inl.trust ?? null); setReportUnavailable(false);
+      } else if (stream.phase === "done") {
+        setReportUnavailable(true);      // done but no report anywhere -> show an explicit error, not a blank
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [stream.phase, runId, report, stream.inlineReport]);
+
+  useEffect(() => {
+    // once a report is available, pull the per-claim verdict ledger (P1-7). Best-effort: a failure here
+    // must never blank the report.
+    if ((stream.phase === "done" || stream.phase === "cancelled") && runId && report) {
+      getClaims(runId).then((d) => setClaims(d.claims ?? [])).catch(() => {});
+    }
+  }, [stream.phase, runId, report]);
 
   async function onStart() {
     if (!llm || !topic || submitting) return;   // guard against rapid double-submit (two server runs)
     setStartError(null); setSubmitting(true);
     // clear the previous run's report up front, so a FAILED start can't leave a stale report on screen
     setReport(null); setReportSources([]); setCitations([]); setBreakdown(null); setFlagged([]); setTrust(null);
+    setClaims([]); setReportUnavailable(false);
     try {
       const editedPlan = plan ? plan.map((q) => q.trim()).filter(Boolean) : undefined;
       const { run_id } = await startResearch({ topic, rounds, llm, search, deep,
@@ -243,7 +280,17 @@ export default function Home() {
         <div className="card" role="alert" style={{ color: "var(--muted)" }}>Research cancelled — no report was produced.</div>
       )}
 
-      {runId && (stream.phase === "done" || (stream.phase === "cancelled" && report)) && (
+      {runId && stream.phase === "done" && reportUnavailable && !report && (
+        <div className="card" role="alert" style={{ borderColor: "var(--bad)", color: "var(--bad)" }}>
+          ⚠ The research finished but the report couldn’t be loaded (the server may have failed to save it).
+          <button className="btn-ghost btn-sm" style={{ marginLeft: 12 }} onClick={() => runId && getRun(runId).then((d) => {
+            if (d && d.report) { setReport(d.report); setReportSources(d.sources ?? []); setCitations(d.citations ?? []);
+              setBreakdown(d.quality_breakdown ?? null); setFlagged(d.flagged ?? []); setTrust(d.trust ?? null); setReportUnavailable(false); }
+          }).catch(() => {})}>Retry</button>
+        </div>
+      )}
+
+      {runId && (stream.phase === "done" || (stream.phase === "cancelled" && report)) && !reportUnavailable && (
         <section className="flex flex-col gap-5">
           <div className="flex items-center justify-between flex-wrap gap-3">
             <h2 className="page-title" style={{ fontSize: 22 }}>
@@ -254,6 +301,7 @@ export default function Home() {
           {report && <ReportView markdown={report} citations={citations} />}
           {breakdown && <QualityBreakdown breakdown={breakdown} />}
           {report && <TrustPanel flagged={flagged} trust={trust ?? undefined} />}
+          {report && <ClaimsTable claims={claims} />}
           <SourceList sources={reportSources} urlStatus={trust?.url_status ?? {}} />
         </section>
       )}

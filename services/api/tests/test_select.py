@@ -35,6 +35,29 @@ def test_assemble_content_prefers_specialist_then_fetch_then_snippet():
     assert content["https://blog.com"] == "FETCHED PAGE TEXT"      # extracted
     assert content["https://docs.x.com"] == "DOCSNIP"             # snippet fallback
 
+
+def test_assemble_content_resolves_redirect_normalized_fetch_key():
+    # fetch_many follows redirects, so the page can come back under a normalized/redirected URL key.
+    # The selected source must still resolve to its FETCHED page — not silently fall back to its snippet.
+    sel = [entry("https://Blog.com/Post/", "blog", 0.45, 0.9, False, content=None, snippet="SNIP")]
+    docs = {"https://blog.com/post": "FETCHED PAGE TEXT"}         # normalized / redirected key
+    content = assemble_content(sel, docs)
+    assert content["https://Blog.com/Post/"] == "FETCHED PAGE TEXT"   # not "SNIP"
+
+
+def test_assemble_content_reports_provenance():
+    sel = [
+        entry("https://arxiv.org/abs/1", "paper", 0.75, 0.8, True, content="ABSTRACT"),
+        entry("https://blog.com", "blog", 0.45, 0.9, False, snippet="SNIP"),
+        entry("https://docs.x.com", "docs", 0.6, 0.7, False, snippet="DOCSNIP"),
+    ]
+    docs = {"https://blog.com": "FETCHED"}
+    content, prov = assemble_content(sel, docs, with_provenance=True)
+    assert prov["https://arxiv.org/abs/1"] == "full"     # had extracted content
+    assert prov["https://blog.com"] == "fetched"         # came from the fetched page
+    assert prov["https://docs.x.com"] == "snippet"       # snippet-only -> lower authority
+    assert content["https://blog.com"] == "FETCHED"
+
 from athena.agents.select import dedup_near
 from athena.search.base import SearchHit
 
@@ -58,6 +81,17 @@ def test_dedup_near_collapses_similar_titles():
 def test_freshness_boosts_recent_year():
     from athena.agents.select import _freshness
     assert _freshness("Best frameworks in 2026", "https://x.com") > _freshness("A 2021 guide", "https://x.com")
+
+
+def test_recency_query_for_time_sensitive_topics():
+    from athena.agents.select import recency_query
+    rv = recency_query("latest LLM model releases")
+    assert rv is not None and "latest" in rv.lower() and "LLM model releases" in rv   # carries a fresh-bias + the question
+    assert recency_query("current pricing of cloud GPUs") is not None
+    assert recency_query("newest agent frameworks") is not None
+    # an evergreen/historical topic is NOT time-sensitive -> no recency variant
+    assert recency_query("history of the Roman Empire") is None
+    assert recency_query("how does TCP work") is None
 
 def test_select_covers_named_entities():
     def mk(url, title, trust=0.5, rel=0.7):

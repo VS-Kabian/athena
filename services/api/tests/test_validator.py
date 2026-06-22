@@ -44,3 +44,11 @@ def test_tiered_authority_ordering():
 def test_reputable_press_is_validated():
     assert is_validated("https://www.reuters.com/technology/x", "Reuters")
     assert is_validated("https://www.gov.uk/guidance", "UK gov")
+
+
+def test_docs_shape_on_unknown_host_is_not_authoritative():
+    # P2-4: a `docs.` subdomain or `/docs` path on an UNRECOGNIZED host must NOT validate on that alone
+    assert not is_validated("https://docs.spam-blog.com/post", "Spam Docs")
+    assert not is_validated("https://random-vendor.io/docs/getting-started", "Random Docs")
+    # a RECOGNIZED docs domain still validates — via the Tier-B allowlist, not the generic modifier
+    assert is_validated("https://docs.github.com/en/actions", "GitHub Actions")

@@ -4,16 +4,17 @@ from ..api.events import bus
 from ..search.base import SearchHit
 from ..search.registry import multi_search
 from ..search.merge import rrf_merge
-from ..search.relevance import filter_by_relevance
+from ..search.relevance import filter_by_relevance, content_relevance
 from ..search.specialist import arxiv_search, github_search
 from ..fetch import fetch_many
 from ..rag import build_evidence, select_span
-from .select import select_sources, assemble_content, dedup_near
+from .select import select_sources, assemble_content, dedup_near, recency_query
 from .planner import decompose, refine, extract_entities, expand_facets
 from .controller import reflect
 from .synthesizer import synthesize_sections, strip_invalid_citations
 from .verifier import verify_report
-from .entail import entail_report
+from .entail import entail_report, from_cosine
+from .recheck import recheck_claims
 from .urlhealth import check_urls, summarize as urlhealth_summary
 from .coverage import compute_coverage, weakest_questions, coverage_note
 from .persist import persist_sources, persist_report, persist_claims
@@ -21,8 +22,8 @@ from . import hop
 from . import graphmem
 from ..memory import recall, remember
 from .validator import score_source, is_validated
-from .guard import factcheck
-from .quality import quality_score
+from .guard import factcheck, enforce_grounding, STRICT_THRESHOLD
+from .quality import quality_score, aggregate_risk
 from ..gateway import ladder
 from ..log import get_logger
 
@@ -202,6 +203,10 @@ async def _fanout_search(question: str, entities: list, providers: list, mode: s
     """Search a sub-question across providers AND a couple of entity-grounded reformulations, then
     RRF-merge — broadens retrieval toward the named subjects instead of one fixed phrasing."""
     queries = [question]
+    # recency-intent variant: for time-sensitive questions, bias one query toward fresh sources (P1-6)
+    rq = recency_query(question)
+    if rq:
+        queries.append(rq)
     for ent in (entities or [])[:2]:
         if ent and ent.lower() not in question.lower():
             queries.append(f"{ent} {question}")
@@ -401,6 +406,16 @@ async def _run_research_inner(run_id: str, topic: str, rounds: int, llm: dict,
 
     # bound the pool to the best sources before scoring/selection (undilute the validation ratio)
     all_hits = _cap_pool(all_hits)
+    # content-aware re-rank (P1-3): entries with a fetched body are re-scored against the topic on their
+    # REAL content (title+snippet was only a proxy). CPU-bound cross-encoder -> off the event loop. If the
+    # reranker is unavailable the helper returns None and we keep the prior title+snippet relevance.
+    _read = [e for e in all_hits.values() if e.get("content")]
+    if _read:
+        _new_rel = await asyncio.to_thread(content_relevance, topic, [e["content"] for e in _read])
+        if _new_rel:
+            for e, r in zip(_read, _new_rel):
+                e["relevance"] = r
+                e["hit"].relevance = r   # keep entry + SearchHit in sync for dedup_near / select_sources
     # smart selection: trust x relevance + type diversity, prefer validated
     selected = select_sources(dedup_near(all_hits), n=SELECT_N, entities=entities)
     fetch_urls = [e["hit"].url for e in selected if not e.get("content")]
@@ -412,8 +427,10 @@ async def _run_research_inner(run_id: str, topic: str, rounds: int, llm: dict,
             for e in selected}
     evidence = await asyncio.to_thread(build_evidence, topic, content, meta, k=32)   # embed+rerank off the loop
     if not evidence:
-        evidence = [{"url": e["hit"].url, "text": e["hit"].snippet, "score": e.get("relevance", 0.0)}
-                    for e in selected if e["hit"].snippet]
+        # prefer the fetched page body over the short snippet (P1-3) so synthesis grounds on real content
+        evidence = [{"url": e["hit"].url, "text": (e.get("content") or e["hit"].snippet),
+                     "score": e.get("relevance", 0.0)}
+                    for e in selected if (e.get("content") or e["hit"].snippet)]
 
     # cross-run memory: pull continuity context from prior related runs (best-effort, never fatal)
     prior_context = ""
@@ -465,29 +482,58 @@ async def _run_research_inner(run_id: str, topic: str, rounds: int, llm: dict,
 
     source_texts_in_order = [src_texts.get(u, "") for u in order]
 
+    # Drop fabricated out-of-range [n] markers BEFORE the trust layer (P0-2C): verify/factcheck/entail must
+    # never operate on dangling citations, and the honest-risk aggregate (P0-1) measures this pre-verifier text.
+    markdown = strip_invalid_citations(markdown, len(order))
+    markdown_pre = markdown   # pre-verifier report snapshot; consumed by the honest-risk aggregate (P0-1)
+    # Write-time grounding gate (P0-2A): count factual body sentences with NO valid in-range [n] — they
+    # are unsupported by construction (the biggest reduce-at-source lever). Non-destructive (detection
+    # only); the count feeds the honest aggregate and the claims surface as flags.
+    _, grounding = enforce_grounding(markdown_pre, len(order))
+
     # second-model verification: an independent model corrects/flags each cited claim (best-effort)
     verifier_contested: list[str] = []
-    if verifier:
-        markdown, verifier_contested = await verify_report(markdown, source_texts_in_order, verifier)
-        await bus.publish(run_id, {"type": "verify", "data": {"contested": len(verifier_contested)}})
-
-    # R5: drop any fabricated out-of-range citation markers before grounding/persist
-    markdown = strip_invalid_citations(markdown, len(order))
+    verify_llm = ladder.for_role("verify", llm, llm_fast, verifier)
+    markdown, verifier_contested = await verify_report(markdown, source_texts_in_order, verify_llm)
+    await bus.publish(run_id, {"type": "verify", "data": {"contested": len(verifier_contested)}})
 
     # factcheck runs local embedding inference (CPU-bound); offload so it never freezes the event
     # loop (and starves other concurrent runs sharing this process). This is the deterministic
     # grounding baseline AND the fallback for the entailment layer below.
-    g = await asyncio.to_thread(factcheck, markdown, source_texts_in_order)
+    # Ground-check against the EXACT chunks shown to the writer (P1-2), not a re-chunk of the first 6000
+    # chars — so a claim supported by a passage deep in a long source isn't falsely flagged.
+    ev_by_url: dict[str, list[str]] = {}
+    for _ev in evidence:
+        ev_by_url.setdefault(_ev["url"], []).append(_ev["text"])
+    evidence_chunks = [ev_by_url.get(u, []) for u in order]
+    g = await asyncio.to_thread(factcheck, markdown_pre, source_texts_in_order, 0.55, evidence_chunks, order)
 
     # ENTAILMENT (the trust moat): a model judges each cited claim Supported / Refuted / Not-Enough-Info
     # and flags cross-source conflicts. Cosine is symmetric and can't see contradictions; entailment can.
-    # Runs on the fast model and degrades to the cosine signal above if unavailable / too thinly covered.
-    ent = await entail_report(markdown, source_texts_in_order, fast, factcheck=g)
+    # Resolved via model ladder and degrades to the cosine signal above if unavailable / too thinly covered.
+    entail_llm = ladder.for_role("entail", llm, llm_fast, verifier)
+    ent = await entail_report(markdown_pre, source_texts_in_order, entail_llm, factcheck=g)
+    # HONEST FALLBACK (P0-3): if the judge didn't actually run (rate-limited / truncated / thin coverage),
+    # retry ONCE on a smaller batch — a reasoning model that overflowed on 8 claims often finishes on 4 —
+    # before trusting cosine alone.
+    if ent["engine"] != "entailment" and ent.get("total", 0):
+        retry = await entail_report(markdown_pre, source_texts_in_order, entail_llm,
+                                    factcheck=g, batch_size=4)
+        if retry["engine"] == "entailment":
+            ent = retry
+    degraded = ent["engine"] != "entailment"
+    if degraded and ent.get("total", 0):
+        # cosine is now the SOLE grounding signal — symmetric and contradiction-blind — so re-run it at a
+        # STRICTER threshold (loose topical overlap must not pass as "supported") and rebuild the summary.
+        g = await asyncio.to_thread(factcheck, markdown_pre, source_texts_in_order, STRICT_THRESHOLD, evidence_chunks, order)
+        ent = from_cosine(g)
+    assurance = "full" if not degraded else "reduced"
     await bus.publish(run_id, {"type": "entail", "data": {
         "engine": ent["engine"], "supported": ent["supported"], "refuted": ent["refuted"],
-        "nei": ent["nei"], "conflicts": ent["conflicts"]}})
-    # entailment risk supersedes the cosine risk only when the model actually judged the claims
-    risk = ent["risk"] if ent["engine"] == "entailment" else g["risk"]
+        "nei": ent["nei"], "conflicts": ent["conflicts"], "assurance": assurance}})
+    # The entail/cosine grounding signal is the CALIBRATED component (entail keeps NEI < refuted on
+    # purpose); the HEADLINE reported number is the honest aggregate computed below.
+    risk_component = ent["risk"] if ent["engine"] == "entailment" else g["risk"]
 
     # URL liveness / fabrication detection: probe every cited source URL (SSRF-guarded) and badge
     # dead links instead of citing them blindly — the cheapest trust win nobody else does.
@@ -497,14 +543,37 @@ async def _run_research_inner(run_id: str, topic: str, rounds: int, llm: dict,
         await bus.publish(run_id, {"type": "urlhealth", "data": {
             "total": hsum["total"], "live": hsum["live"], "dead": hsum["dead"],
             "unreachable": hsum["unreachable"]}})
+    dead_links = [u for u in hsum["bad"] if (health.get(u) or {}).get("status") == "dead"]
+
+    # HONEST hallucination aggregate (P0-1): measured on the PRE-verifier report, with NEI at near-full
+    # weight, PLUS the real defects the entailment judge cannot price — cross-source conflicts, dead/
+    # fabricated citation links, and claims the verifier had to correct/drop. This is the REPORTED number;
+    # `risk_component` is kept for transparency. (Uncited factual claims feed the `uncited` term once the
+    # Step-3 write-time grounding gate lands.) `corrections` is a conservative additive signal: when the
+    # pre-verifier entailment already flagged the same claim it slightly over-counts — an intentional bias
+    # toward NOT under-reporting hallucination.
+    total_claims = (ent.get("total", 0) or g.get("total", 0))
+    agg = aggregate_risk(
+        refuted=ent.get("refuted", 0), nei=ent.get("nei", 0), total_claims=total_claims,
+        conflicts=ent.get("conflicts", 0), dead_citations=len(dead_links),
+        corrections=len(verifier_contested), uncited=grounding["uncited"],
+        degraded=(degraded and total_claims > 0))   # uncertainty floor only when there were claims to judge
+    risk = agg["risk"]
 
     validated_count = sum(1 for e in all_hits.values() if e["validated"])
-    rels = [e["relevance"] for e in all_hits.values()]
+    # Relevance of the evidence we actually USED in the report — not an average over every off-topic hit we
+    # merely discovered. Averaging over all discoveries punished thorough search (more blogs seen -> lower
+    # score); the trust signal is "how on-topic is what we cited", mirroring the validated-count credit above.
+    used_rel = [all_hits[u]["relevance"] for u in order if u in all_hits]
+    rels = used_rel or [e["relevance"] for e in all_hits.values()]
     avg_rel = sum(rels) / len(rels) if rels else 0.0
     qual = quality_score(len(all_hits), validated_count, risk, rounds,
-                         avg_relevance=avg_rel, content_fetched=content_fetched)
+                         avg_relevance=avg_rel, content_fetched=content_fetched,
+                         coverage_ledger_score=cov.get("overall", 0.0),
+                         refuted=ent.get("refuted", 0), dead_links=len(dead_links))
     await bus.publish(run_id, {"type": "quality", "data": {
         "score": qual["score"], "breakdown": qual["breakdown"], "hallucination_risk": risk,
+        "hallucination_risk_component": risk_component, "assurance": assurance,
         "consensus": g.get("consensus")}})
 
     title_by_url = {e["hit"].url: e["hit"].title for e in selected}
@@ -518,9 +587,26 @@ async def _run_research_inner(run_id: str, topic: str, rounds: int, llm: dict,
                 for i, u in enumerate(order)]
     citations = await asyncio.to_thread(_build_citations)
     # use whichever grounding engine actually ran for the per-claim warnings (entailment supersedes cosine)
+    # Reference-free re-verification (P1-4, deep mode only): re-check the highest-risk claims against a
+    # FRESH independent search — entailment only compares a claim to its CITED source, so a wrong source or
+    # a subtle misread can slip through. Flag any claim a fresh source refutes ("cited-but-wrong").
+    recheck_flags: list[str] = []
+    if deep and ent["engine"] == "entailment" and ent.get("verdicts"):
+        async def _rsearch(q):
+            return await multi_search(q, providers, mode=mode, k=6)
+
+        async def _rfetch(urls):
+            return await fetch_many(urls, limit=3)
+
+        try:
+            rc = await recheck_claims(ent["verdicts"], topic, entail_llm, search=_rsearch, fetch=_rfetch)
+            recheck_flags = [f"⚠ [cited-but-wrong] {r['claim']}" for r in rc if r.get("refuted_by_fresh")][:4]
+        except Exception as e:
+            log.warning("reference-free recheck failed (continuing): %s", e)
+
     trust_flags = ent["flagged"] if ent["engine"] == "entailment" else (g.get("flagged") or [])
-    dead_links = [u for u in hsum["bad"] if (health.get(u) or {}).get("status") == "dead"]
-    flagged = (trust_flags[:10] + verifier_contested[:6]
+    flagged = (trust_flags[:10] + verifier_contested[:6] + recheck_flags
+               + [f"⚠ [uncited claim] {s}" for s in grounding["claims"][:4]]
                + [f"⚠ [link dead] {u}" for u in dead_links[:4]]
                + [f"⚠ single-source (uncorroborated): {s}" for s in (g.get("single_source") or [])[:4]])
     breakdown = dict(qual["breakdown"]); breakdown["hallucination_risk"] = risk
@@ -533,6 +619,8 @@ async def _run_research_inner(run_id: str, topic: str, rounds: int, llm: dict,
              "nei": ent["nei"], "conflicts": ent["conflicts"],
              "conflict_items": ent.get("conflict_items", []),
              "consensus": g.get("consensus"), "single_source": len(g.get("single_source") or []),
+             "hallucination_risk": risk, "risk_component": risk_component, "assurance": assurance,
+             "risk_breakdown": agg["components"], "corrections": len(verifier_contested),
              "url_health": {"total": hsum["total"], "live": hsum["live"], "dead": hsum["dead"],
                             "unreachable": hsum["unreachable"]},
              "url_status": {u: r.get("status") for u, r in health.items()},
@@ -542,11 +630,17 @@ async def _run_research_inner(run_id: str, topic: str, rounds: int, llm: dict,
             await persist_claims(run_id, ent["verdicts"])
         except Exception as e:
             log.warning("persist_claims failed (continuing): %s", e)
-    try:
-        await persist_report(run_id, markdown, qual["score"], breakdown, citations, flagged, trust)
-    except Exception as e:
-        # a DB blip at the finish line must NOT discard a fully-synthesized report -> still emit done
-        log.error("persist_report failed (report was produced; surfacing it anyway): %s", e)
+    # Persist with a single retry — a transient DB blip at the finish line must NOT silently become a blank
+    # "Done" (P0-4). If it still fails, surface the fully-synthesized report INLINE in the done event so the
+    # client can render it (and retry the read) instead of showing an empty report.
+    persist_ok = False
+    for attempt in range(2):
+        try:
+            await persist_report(run_id, markdown, qual["score"], breakdown, citations, flagged, trust)
+            persist_ok = True
+            break
+        except Exception as e:
+            log.error("persist_report failed (attempt %d/2): %s", attempt + 1, e)
     try:
         await remember(run_id, topic, markdown)   # store this run for future recall (best-effort)
     except Exception:
@@ -555,7 +649,12 @@ async def _run_research_inner(run_id: str, topic: str, rounds: int, llm: dict,
         await graphmem.extract_and_store(run_id, all_hits, fast)   # GraphRAG triples (opt-in; no-op when off)
     except Exception as e:
         log.warning("graphmem extract_and_store failed (continuing): %s", e)
-    await bus.publish(run_id, {"type": "done", "data": {"report_ready": True, "quality": qual["score"]}})
+    done_data = {"report_ready": persist_ok, "quality": qual["score"]}
+    if not persist_ok:
+        # inline fallback so a finish-line DB failure never shows "Done" over a blank report
+        done_data["report"] = {"markdown": markdown, "quality_breakdown": breakdown,
+                               "citations": citations, "flagged": flagged, "trust": trust}
+    await bus.publish(run_id, {"type": "done", "data": done_data})
     return markdown
 
 

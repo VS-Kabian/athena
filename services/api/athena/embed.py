@@ -1,5 +1,7 @@
 import numpy as np
 
+from .config import settings
+
 _model = None
 _QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 
@@ -7,7 +9,7 @@ def _get_model():
     global _model
     if _model is None:
         from fastembed import TextEmbedding
-        _model = TextEmbedding("BAAI/bge-small-en-v1.5")
+        _model = TextEmbedding(settings.embed_model)   # configurable (P1-1); default = bge-small (384-dim)
     return _model
 
 def embed_passages(texts: list[str]) -> list[list[float]]:
@@ -34,7 +36,7 @@ def _get_reranker():
     global _reranker
     if _reranker is None:
         from fastembed.rerank.cross_encoder import TextCrossEncoder
-        _reranker = TextCrossEncoder("Xenova/ms-marco-MiniLM-L-6-v2")
+        _reranker = TextCrossEncoder(settings.rerank_model)   # configurable (P1-1); default = MiniLM
     return _reranker
 
 def rerank(query: str, passages: list[str]) -> list[float]:

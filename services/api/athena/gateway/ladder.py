@@ -13,7 +13,7 @@ main model, so a single configured model still works everywhere.
 # roles that should use the strong (frontier) model — quality matters more than cost
 _FRONTIER = frozenset({"synthesis", "draft"})
 # roles best served by an independent checker model when one is configured
-_CHECK = frozenset({"verify"})
+_CHECK = frozenset({"verify", "entail"})
 
 
 def for_role(role: str, llm: dict, fast: dict | None = None, verifier: dict | None = None) -> dict:

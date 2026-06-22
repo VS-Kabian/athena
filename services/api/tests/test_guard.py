@@ -59,3 +59,43 @@ def test_multi_source_claim_is_corroborated():
          patch("athena.agents.guard.embed_passages", side_effect=emb_p):
         r = factcheck(md, ["src a", "src b"])
     assert r["consensus"] == 1.0 and r["single_source"] == []
+
+
+def test_corroboration_excludes_same_domain_as_cited():
+    # P2-8: the only OTHER supporter is a mirror on the cited claim's own domain -> NOT independent
+    md = "## F\nA widely repeated fact [1].\n\n## Sources\n1. a\n2. b"
+    urls = ["https://site.com/x", "https://site.com/y"]      # cited + same-domain mirror
+    with patch("athena.agents.guard.embed_query", return_value=[1.0, 0.0]), \
+         patch("athena.agents.guard.embed_passages", side_effect=lambda chunks: [[1.0, 0.0]]):
+        r = factcheck(md, ["primary", "mirror"], source_urls=urls)
+    assert r["consensus"] == 0.0                              # same-domain mirror doesn't corroborate
+    assert any("widely repeated fact" in s for s in r["single_source"])
+
+
+def test_corroboration_counts_distinct_domain():
+    md = "## F\nA widely repeated fact [1].\n\n## Sources\n1. a\n2. b"
+    urls = ["https://site.com/x", "https://other-org.com/y"]  # cited + an INDEPENDENT domain
+    with patch("athena.agents.guard.embed_query", return_value=[1.0, 0.0]), \
+         patch("athena.agents.guard.embed_passages", side_effect=lambda chunks: [[1.0, 0.0]]):
+        r = factcheck(md, ["primary", "independent"], source_urls=urls)
+    assert r["consensus"] == 1.0                              # a distinct domain genuinely corroborates
+
+
+def test_factcheck_grounds_against_supplied_evidence_chunks_not_raw_source():
+    # P1-2: when given the EXACT chunks shown to the writer, factcheck embeds THOSE — not a re-chunk of the
+    # raw page — so a claim whose supporting passage sits past the first 6000 chars is checked correctly.
+    md = "## Findings\nThe model reached state of the art on the benchmark [1].\n\n## Sources\n1. a"
+    raw = "filler text. " * 1000                                      # supporting passage NOT in first 6000 chars
+    shown = ["The model reached state of the art on the benchmark."]   # the chunk actually shown to the writer
+    seen: list[str] = []
+
+    def spy_embed_passages(chunks):
+        seen.extend(chunks)
+        return [[1.0, 0.0] for _ in chunks]
+
+    with patch("athena.agents.guard.embed_query", return_value=[1.0, 0.0]), \
+         patch("athena.agents.guard.embed_passages", side_effect=spy_embed_passages):
+        r = factcheck(md, [raw], evidence_chunks=[shown])
+    assert any("state of the art" in p for p in seen)   # the shown chunk WAS embedded
+    assert not any("filler" in p for p in seen)          # the raw page was NOT re-chunked
+    assert r["risk"] == 0.0                               # and the claim is grounded against the shown chunk

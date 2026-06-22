@@ -36,6 +36,23 @@ def _rerank_cached(topic: str, texts: list[str]) -> list[float]:
     return [_SCORE_CACHE[(topic, t)] for t in texts]
 
 
+_CONTENT_MAX = 2000   # cap the body fed to the cross-encoder (short input window) + keep the cache useful
+
+
+def content_relevance(topic: str, texts: list[str]) -> list[float] | None:
+    """Re-score (topic, fetched-body) pairs with the cross-encoder, returning sigmoid scores in [0, 1]
+    aligned to ``texts``. Used to re-rank sources on their REAL page content once mid-loop reading has it
+    (title+snippet was only a proxy, P1-3). Bodies are truncated to bound the cross-encoder input. Returns
+    ``None`` when the reranker can't score, so the caller keeps the prior (title+snippet) relevance."""
+    if not texts:
+        return []
+    trimmed = [(t or "")[:_CONTENT_MAX] for t in texts]
+    scores = _rerank_cached(topic, trimmed)
+    if not scores or len(scores) != len(texts):
+        return None
+    return [round(_sigmoid(s), 3) for s in scores]
+
+
 def filter_by_relevance(topic: str, hits: list[SearchHit], threshold: float = 0.50,
                         min_keep: int = 5) -> list[SearchHit]:
     """Keep hits relevant to ``topic``. Primary path uses the cross-encoder reranker (sharper than
@@ -61,5 +78,7 @@ def filter_by_relevance(topic: str, hits: list[SearchHit], threshold: float = 0.
         h.relevance = r
     kept = [h for h, r in scored if r >= threshold]
     if not kept:
-        kept = [h for h, _ in sorted(scored, key=lambda x: x[1], reverse=True)[:min_keep]]
+        # nothing cleared the bar: keep the top few — but only those above an ABSOLUTE floor, so a wholly
+        # off-topic batch returns fewer (or none) rather than force-feeding the pipeline junk sources (P3).
+        kept = [h for h, r in sorted(scored, key=lambda x: x[1], reverse=True)[:min_keep] if r >= 0.15]
     return kept

@@ -28,6 +28,37 @@ async def test_health():
         assert r.json()["ok"] is True and "db" in r.json()
 
 @pytest.mark.asyncio
+async def test_get_claims_returns_persisted_verdicts():
+    async def fake_fetch(q, *a):
+        if "from research_runs" in q:
+            return [{"id": "rid"}]
+        if "from claims" in q:
+            return [{"text": "Earth is flat", "verdict": "refuted", "confidence": 0.4, "conflict": True}]
+        return []
+    with patch("athena.api.runs.fetch", side_effect=fake_fetch):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.get("/api/research/rid/claims")
+    assert r.status_code == 200
+    assert r.json()["claims"][0] == {"text": "Earth is flat", "verdict": "refuted",
+                                     "confidence": 0.4, "conflict": True}
+
+@pytest.mark.asyncio
+async def test_get_claims_404_for_unknown_run():
+    with patch("athena.api.runs.fetch", AsyncMock(return_value=[])):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.get("/api/research/nope/claims")
+    assert r.status_code == 404
+
+@pytest.mark.asyncio
+async def test_report_export_404_when_no_report():
+    # P3: a missing report must 404, not download a "# No report" placeholder as if it were the report
+    with patch("athena.api.runs.fetch", AsyncMock(return_value=[])):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            md = await c.get("/api/research/none/report.md")
+            pdf = await c.get("/api/research/none/report.pdf")
+    assert md.status_code == 404 and pdf.status_code == 404
+
+@pytest.mark.asyncio
 async def test_unknown_provider_models_returns_404():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.get("/api/providers/notaprovider/models")

@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     # Deployment environment (env ATHENA_ENV). When not "dev", a missing ATHENA_SECRET is fatal at
     # startup instead of silently falling back to an ephemeral local key file.
     athena_env: str = "dev"
+    # Retrieval models (P1-1). Defaults are the small 384-dim dense model + MiniLM reranker the offline
+    # test suite expects, so leaving these unset keeps everything green. Override to upgrade — e.g.
+    # ATHENA_EMBED_MODEL=BAAI/bge-large-en-v1.5 (1024-dim), which REQUIRES the pgvector dim migration in
+    # migrations/optional/010 and a re-embed. NOTE: fastembed<=0.8 ships no bge-m3; pin a newer fastembed
+    # before selecting it. The reranker can be upgraded independently (e.g. BAAI/bge-reranker-base).
+    embed_model: str = Field("BAAI/bge-small-en-v1.5", validation_alias=AliasChoices("ATHENA_EMBED_MODEL", "EMBED_MODEL"))
+    rerank_model: str = Field("Xenova/ms-marco-MiniLM-L-6-v2", validation_alias=AliasChoices("ATHENA_RERANK_MODEL", "RERANK_MODEL"))
 
     @property
     def cors_origins_list(self) -> list[str]:

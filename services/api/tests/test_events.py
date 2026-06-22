@@ -72,3 +72,46 @@ async def test_backlog_is_ring_buffered(monkeypatch):
     assert got[-1]["type"] == "done"                    # terminal always delivered
     idxs = [e["data"]["i"] for e in got if e["type"] == "source"]
     assert idxs == [4, 5, 6, 7]                         # only the newest survived, in order
+
+
+@pytest.mark.asyncio
+async def test_subscribe_seq_carries_monotonic_ids():
+    bus = EventBus()
+    await bus.publish("rs", {"type": "source", "data": {"i": 0}})
+    await bus.publish("rs", {"type": "source", "data": {"i": 1}})
+    await bus.publish("rs", {"type": "done", "data": {}})
+    got = []
+    async for seq, ev in bus.subscribe_seq("rs"):
+        got.append(seq)
+        if ev["type"] == "done":
+            break
+    assert got == [0, 1, 2]                              # absolute index = the SSE id:
+
+
+@pytest.mark.asyncio
+async def test_subscribe_seq_resumes_after_last_event_id():
+    """A reconnecting client passing Last-Event-ID gets ONLY newer events, not a full replay (P2-5)."""
+    bus = EventBus()
+    for i in range(3):
+        await bus.publish("rr", {"type": "source", "data": {"i": i}})
+    await bus.publish("rr", {"type": "done", "data": {}})
+    got = []
+    async for seq, ev in bus.subscribe_seq("rr", last_event_id=1):   # resume AFTER id 1
+        got.append((seq, ev.get("data", {}).get("i")))
+        if ev["type"] == "done":
+            break
+    assert [s for s, _ in got] == [2, 3]                # ids 0,1 are NOT replayed
+    assert got[0] == (2, 2)                             # resumes at the next source (i=2)
+
+
+@pytest.mark.asyncio
+async def test_subscribe_wrapper_still_replays_from_start():
+    bus = EventBus()
+    await bus.publish("rb", {"type": "a", "data": {}})
+    await bus.publish("rb", {"type": "done", "data": {}})
+    got = []
+    async for ev in bus.subscribe("rb"):                # bare wrapper unchanged (backward-compatible)
+        got.append(ev["type"])
+        if ev["type"] == "done":
+            break
+    assert got == ["a", "done"]

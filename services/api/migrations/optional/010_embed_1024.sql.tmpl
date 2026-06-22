@@ -1,0 +1,33 @@
+-- OPTIONAL / MANUAL migration — do NOT place this in migrations/ as a .sql file.
+-- migrate.py globs `migrations/*.sql` and runs EVERY match unconditionally with no applied-ledger, so a
+-- dim-changing ALTER in that folder would auto-run and corrupt/*break* the live 384-dim store. This lives
+-- in migrations/optional/ with a .sql.tmpl extension specifically so the glob never picks it up.
+--
+-- WHEN to apply: only when switching ATHENA_EMBED_MODEL to a 1024-dim model (e.g. BAAI/bge-large-en-v1.5).
+-- The pgvector column dim and the embedding model dim MUST move together (see 005_memory.sql:8, vector(384)).
+--
+-- PRECONDITIONS (the operator must ensure):
+--   1. Set ATHENA_EMBED_MODEL to the 1024-dim model and restart the API FIRST (so new rows are 1024-dim).
+--   2. Old 384-dim rows are NOT comparable to 1024-dim query vectors — they must be re-embedded or cleared.
+--      The simplest safe path is to clear cross-run memory (it is a best-effort recall cache, not source data).
+--   3. Drop the HNSW index before the type change and recreate it after (an index can't span a dim change).
+--
+-- Apply manually, e.g.:  psql "$DATABASE_URL" -f migrations/optional/010_embed_1024.sql.tmpl
+
+BEGIN;
+
+-- 1. drop the dimension-bound vector index
+DROP INDEX IF EXISTS idx_memory_embedding;
+
+-- 2. clear stale 384-dim vectors (recall cache only; safe to rebuild on subsequent runs).
+--    If you instead want to PRESERVE rows, re-embed them with the new model BEFORE this migration and
+--    replace this TRUNCATE with a row-by-row UPDATE — never let 384-dim and 1024-dim rows coexist.
+TRUNCATE TABLE research_memory;
+
+-- 3. widen the column to the new model's dimension
+ALTER TABLE research_memory ALTER COLUMN embedding TYPE vector(1024);
+
+-- 4. recreate the ANN index at the new dimension
+CREATE INDEX idx_memory_embedding ON research_memory USING hnsw (embedding vector_cosine_ops);
+
+COMMIT;

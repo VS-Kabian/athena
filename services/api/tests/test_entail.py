@@ -25,6 +25,22 @@ def test_cited_sentences_only_picks_cited():
     assert len(s) == 2 and all("[" in x for x in s)
 
 
+def test_cited_sentences_skips_meta_table_and_about_sources():
+    md = ("## Findings\n"
+          "This report examines the four leading frameworks [1].\n"                 # framing -> skip
+          "No evidence of native MCP support is present in the available sources [7].\n"  # about-sources -> skip
+          "| **Architecture** | Graph-based state machines with checkpointing [3][12] |\n"  # table -> kept, cleaned
+          "LangGraph models agents as stateful directed graphs with conditional routing [5].\n"  # real -> kept
+          "\n## Sources\n1. a")
+    s = cited_sentences(md)
+    assert not any("this report examines" in x.lower() for x in s)   # self-referential framing dropped
+    assert not any("available sources" in x.lower() for x in s)      # statement about the evidence dropped
+    assert any("LangGraph models agents" in x for x in s)            # genuine factual claim kept
+    joined = " ~~ ".join(s)
+    assert "Graph-based state machines" in joined                    # table-row claim kept...
+    assert "|" not in joined and "**" not in joined                  # ...but its markdown noise stripped
+
+
 @pytest.mark.asyncio
 async def test_entailment_supported_and_refuted_counts():
     fake = _fake_returning([{"n": 1, "verdict": "supported", "confidence": 0.9, "conflict": False},
@@ -88,11 +104,13 @@ async def test_partial_coverage_above_floor_still_reports_entailment():
 @pytest.mark.asyncio
 async def test_entailment_parses_json_inside_markdown_fence():
     async def fake(provider, model, messages, api_key, **kw):
-        return "```json\n[{\"n\": 1, \"verdict\": \"supported\", \"confidence\": 0.9, \"conflict\": false}," \
-               "{\"n\": 2, \"verdict\": \"refuted\", \"confidence\": 0.8, \"conflict\": false}]\n```"
+        return "```json\n[{\"n\": 1, \"verdict\": \"supported\", \"confidence\": 0.9, \"conflict\": false, \"reasoning\": \"The evidence explicitly states it.\"}," \
+               "{\"n\": 2, \"verdict\": \"refuted\", \"confidence\": 0.8, \"conflict\": false, \"reasoning\": \"The numbers disagree.\"}]\n```"
     with patch.object(entail, "complete", side_effect=fake):
         r = await entail_report(MD, SRC, LLM)
     assert r["engine"] == "entailment" and r["supported"] == 1 and r["refuted"] == 1
+    assert r["verdicts"][0]["reasoning"] == "The evidence explicitly states it."
+    assert r["verdicts"][1]["reasoning"] == "The numbers disagree."
 
 
 def test_extract_json_array_handles_fences_and_prose():
@@ -139,3 +157,30 @@ async def test_nei_counts_less_than_refuted_toward_hallucination_risk():
 def test_from_cosine_shape():
     r = from_cosine({"total": 5, "unsupported": 2, "risk": 0.4})
     assert r["engine"] == "embedding" and r["supported"] == 3 and r["nei"] == 2 and r["refuted"] == 0
+
+
+@pytest.mark.asyncio
+async def test_risk_is_uncapped_and_responsive():
+    """Honesty / anti-cap guard (criterion 3): the hallucination-risk metric is never faked, capped, or
+    floored — it MOVES with the judge's verdicts. All-refuted pins risk high, all-supported pins it to
+    exactly zero, and a mixed verdict lands strictly between the two extremes. If anyone later clamps
+    risk into a flattering band or biases the judge toward 'supported', one of these three poles breaks."""
+    all_refuted = _fake_returning([{"n": 1, "verdict": "refuted", "confidence": 0.9, "conflict": False},
+                                   {"n": 2, "verdict": "refuted", "confidence": 0.9, "conflict": False}])
+    with patch.object(entail, "complete", side_effect=all_refuted):
+        hi = await entail_report(MD, SRC, LLM)
+    assert hi["engine"] == "entailment"
+    assert hi["risk"] >= 0.9                         # every claim contradicted -> risk pinned high, not capped
+
+    all_supported = _fake_returning([{"n": 1, "verdict": "supported", "confidence": 0.9, "conflict": False},
+                                     {"n": 2, "verdict": "supported", "confidence": 0.9, "conflict": False}])
+    with patch.object(entail, "complete", side_effect=all_supported):
+        lo = await entail_report(MD, SRC, LLM)
+    assert lo["risk"] == 0.0                         # fully grounded -> exactly zero, never floored above it
+
+    half = _fake_returning([{"n": 1, "verdict": "refuted", "confidence": 0.9, "conflict": False},
+                            {"n": 2, "verdict": "supported", "confidence": 0.9, "conflict": False}])
+    with patch.object(entail, "complete", side_effect=half):
+        mid = await entail_report(MD, SRC, LLM)
+    assert 0.0 < mid["risk"] < hi["risk"]            # mixed verdicts -> strictly between the extremes
+    assert lo["risk"] < mid["risk"]                  # monotonic low -> mid -> high: the metric is responsive
